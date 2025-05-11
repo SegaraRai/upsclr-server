@@ -26,8 +26,9 @@ pub enum AppError {
     // Errors related to request processing
     BadRequest(String), // General bad request (e.g., invalid parameters)
     MultipartError(axum::extract::multipart::MultipartError),
-    UnsupportedImageFormatToDecode(String), // Unsupported image format for decoding
-    UnsupportedImageFormatToEncode(String), // Unsupported image format for encoding
+    UnsupportedMediaType(String), // Unsupported media type (e.g., Content-Type)
+    NotAcceptable(String),        // Unsupported Accept header
+    UnprocessableContent(String), // Unprocessable content (e.g., image too large)
     ImageProcessingError(String), // Errors during image decoding/encoding
 
     // General I/O or internal errors
@@ -45,7 +46,7 @@ impl IntoResponse for AppError {
                 "PLUGIN_LOAD_ERROR",
             ),
             AppError::PluginNotFound(s) => (
-                StatusCode::BAD_REQUEST, // Or NOT_FOUND if plugin_id is part of path
+                StatusCode::BAD_REQUEST,
                 format!("The requested plugin was not found: {}", s),
                 "PLUGIN_NOT_FOUND",
             ),
@@ -60,12 +61,12 @@ impl IntoResponse for AppError {
                 "INSTANCE_NOT_FOUND",
             ),
             AppError::InstanceCreationFailed(s) => (
-                StatusCode::INTERNAL_SERVER_ERROR, // Or BAD_REQUEST if due to bad config
+                StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to create engine instance: {}", s),
                 "INSTANCE_CREATION_FAILED",
             ),
             AppError::PluginOperationFailed { operation, details } => (
-                StatusCode::INTERNAL_SERVER_ERROR, // Could be BAD_REQUEST if it's user error via plugin
+                StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Plugin operation '{}' failed: {}", operation, details),
                 "PLUGIN_OPERATION_FAILED",
             ),
@@ -75,18 +76,23 @@ impl IntoResponse for AppError {
                 format!("Invalid multipart request: {}", e),
                 "MULTIPART_ERROR",
             ),
-            AppError::UnsupportedImageFormatToDecode(s) => (
+            AppError::UnsupportedMediaType(s) => (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                format!("Unsupported image format: {}", s),
-                "UNSUPPORTED_IMAGE_FORMAT_TO_DECODE",
+                format!("Unsupported media type to read: {}", s),
+                "UNSUPPORTED_MEDIA_TYPE",
             ),
-            AppError::UnsupportedImageFormatToEncode(s) => (
+            AppError::NotAcceptable(s) => (
                 StatusCode::NOT_ACCEPTABLE,
-                format!("Unsupported image format: {}", s),
-                "UNSUPPORTED_IMAGE_FORMAT_TO_ENCODE",
+                format!("Unsupported media type to write: {}", s),
+                "NOT_ACCEPTABLE",
+            ),
+            AppError::UnprocessableContent(s) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Unprocessable content: {}", s),
+                "UNPROCESSABLE_CONTENT",
             ),
             AppError::ImageProcessingError(s) => (
-                StatusCode::UNPROCESSABLE_ENTITY, // 422 for valid request but semantic error with content
+                StatusCode::UNPROCESSABLE_ENTITY,
                 format!("Image processing error: {}", s),
                 "IMAGE_PROCESSING_ERROR",
             ),

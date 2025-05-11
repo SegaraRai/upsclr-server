@@ -2,21 +2,19 @@
 // Sets up the Tokio runtime, initializes services (PluginManager, InstanceManager),
 // configures the Axum router, and starts the HTTP server.
 
-mod combined_state_handlers;
 mod error;
 mod handlers;
 mod headers;
 mod instance_manager;
 mod models;
 mod plugin_ffi;
-mod plugin_manager; // New module for handlers with combined state
+mod plugin_manager;
 
 use axum::{
     extract::DefaultBodyLimit,
     routing::{delete, get, post},
     Router,
 };
-// Using the type aliases directly from combined_state_handlers
 use instance_manager::InstanceManager;
 use plugin_manager::PluginManager;
 use std::sync::{Arc, Mutex};
@@ -41,7 +39,7 @@ async fn main() {
 
     // Configuration: Path to the directory containing plugin shared libraries.
     // Consider making this configurable via environment variable or config file.
-    let plugins_directory = "./plugins";
+    let plugins_directory = "plugins";
     tracing::info!("Plugin directory set to: {}", plugins_directory);
 
     // --- Initialize PluginManager ---
@@ -57,7 +55,7 @@ async fn main() {
         }
     };
     tracing::info!(
-        "PluginManager initialized. Loaded {} plugins.",
+        "PluginManager initialized. Loaded {} plugin(s).",
         plugin_manager_arc.plugins.len()
     );
     if plugin_manager_arc.plugins.is_empty() {
@@ -99,22 +97,12 @@ async fn main() {
         // Instance management endpoints
         .route(
             "/",
-            get(combined_state_handlers::list_instances)
-                .post(combined_state_handlers::create_instance_handler),
+            get(handlers::list_instances).post(handlers::create_instance_handler),
         )
-        .route(
-            "/{uuid}",
-            delete(combined_state_handlers::delete_instance_handler),
-        )
+        .route("/{uuid}", delete(handlers::delete_instance_handler))
         // Instance operations
-        .route(
-            "/{uuid}/preload",
-            post(combined_state_handlers::preload_instance),
-        )
-        .route(
-            "/{uuid}/upscale",
-            post(combined_state_handlers::upscale_image),
-        )
+        .route("/{uuid}/preload", post(handlers::preload_instance))
+        .route("/{uuid}/upscale", post(handlers::upscale_image))
         .with_state(combined_state);
 
     // Merge the routers
