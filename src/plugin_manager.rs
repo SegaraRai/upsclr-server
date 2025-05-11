@@ -25,7 +25,7 @@ impl Drop for PluginLibrary {
         unsafe {
             (self.upsclr_plugin_shutdown)();
         }
-        tracing::info!("Dropped plugin library: {}", self.id);
+        tracing::debug!("Dropped plugin library: {}", self.id);
     }
 }
 

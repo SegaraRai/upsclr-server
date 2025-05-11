@@ -465,7 +465,7 @@ pub async fn create_instance_handler(
 
     // If dry_run is active, return validation result without creating an instance.
     if dry_run_active {
-        tracing::info!("Dry run completed for instance creation.");
+        tracing::debug!("Dry run completed for instance creation.");
         return Ok(Json(CreateInstanceResponse {
             instance_id: None,
             validation: validation_result_desc,
@@ -550,7 +550,7 @@ pub async fn preload_instance(
                 uuid,
                 params.scale
             );
-            Ok(StatusCode::OK)
+            Ok(StatusCode::NO_CONTENT)
         }
         err_code => {
             tracing::error!(
@@ -576,10 +576,10 @@ pub async fn delete_instance_handler(
     State((_, instance_manager_mutex)): State<(SharedPluginManager, SharedInstanceManager)>,
     Path(uuid): Path<Uuid>, // Extract UUID from the URL path.
 ) -> Result<StatusCode, AppError> {
-    tracing::info!("Request to delete instance: {}", uuid);
+    tracing::debug!("Request to delete instance: {}", uuid);
     let mut manager_locked = lock_mutex_app_error(&instance_manager_mutex, "delete_instance")?;
     manager_locked.delete_instance(&uuid)?; // This now returns AppError::InstanceNotFound on failure.
-    tracing::info!("Successfully deleted instance: {}", uuid);
+    tracing::debug!("Successfully deleted instance: {}", uuid);
     Ok(StatusCode::NO_CONTENT) // HTTP 204 No Content on successful deletion.
 }
 
@@ -640,7 +640,7 @@ pub async fn upscale_image(
         }
 
         if ignored_fields > 0 {
-            tracing::info!(
+            tracing::debug!(
                 "Ignored {} non-file fields in multipart request",
                 ignored_fields
             );

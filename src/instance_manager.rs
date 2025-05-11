@@ -36,13 +36,13 @@ impl Drop for ActiveInstance {
     fn drop(&mut self) {
         // Ensure the pointer is not null before calling destroy
         if !self.instance_ptr.is_null() {
-            tracing::info!("Dropping engine instance: {}", self.uuid);
+            tracing::debug!("Dropping engine instance: {}", self.uuid);
             // Call the plugin's FFI function to destroy the instance
             unsafe {
                 (self.plugin.upsclr_plugin_destroy_engine_instance)(self.instance_ptr);
             }
         }
-        tracing::info!("Dropped engine instance: {}", self.uuid);
+        tracing::debug!("Dropped engine instance: {}", self.uuid);
     }
 }
 
