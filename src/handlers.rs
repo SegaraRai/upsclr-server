@@ -439,9 +439,9 @@ pub async fn create_instance_handler(
         let desc = ValidationResultDesc {
             is_valid: c_result.is_valid,
             error_count: c_result.error_count,
+            error_messages: errors,
             warning_count: c_result.warning_count,
             warning_messages: warnings,
-            error_messages: errors,
         };
         // Important: Free the validation result memory allocated by the plugin.
         unsafe {
@@ -457,9 +457,9 @@ pub async fn create_instance_handler(
         Some(ValidationResultDesc {
             is_valid: true,
             error_count: 0,
+            error_messages: vec![],
             warning_count: 0,
             warning_messages: vec![],
-            error_messages: vec![],
         })
     };
 

@@ -46,9 +46,9 @@ pub struct CreateInstanceResponse {
 pub struct ValidationResultDesc {
     pub is_valid: bool,
     pub error_count: usize,
+    pub error_messages: Vec<String>,
     pub warning_count: usize,
     pub warning_messages: Vec<String>,
-    pub error_messages: Vec<String>,
 }
 
 // Query parameters for endpoints that accept a 'scale' factor,
@@ -99,6 +99,7 @@ where
 #[derive(Serialize, Debug)]
 pub struct InstanceInfoForList {
     pub instance_id: Uuid,
+    pub plugin_id: String,
     pub plugin_name: String,
     pub engine_name: String,
     // Potentially include more details like creation time or basic config summary if needed.

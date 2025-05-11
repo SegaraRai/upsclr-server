@@ -111,6 +111,7 @@ impl InstanceManager {
         self.instances
             .values()
             .map(|instance_arc| {
+                let plugin_id = instance_arc.plugin.plugin_info.id.clone();
                 let plugin_name = instance_arc.plugin.plugin_info.name.clone();
                 // Ensure engine_index_in_plugin is valid before indexing.
                 let engine_name = instance_arc
@@ -124,6 +125,7 @@ impl InstanceManager {
 
                 InstanceInfoForList {
                     instance_id: instance_arc.uuid,
+                    plugin_id,
                     plugin_name,
                     engine_name,
                 }
