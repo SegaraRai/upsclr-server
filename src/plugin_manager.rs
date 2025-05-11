@@ -166,7 +166,10 @@ impl PluginManager {
         }
 
         if loaded_plugins_vec.is_empty() {
-            tracing::warn!("No plugins were successfully loaded from directory: {}. The server might not have any upscaling capabilities.", plugins_dir_path_str);
+            tracing::warn!(
+                "No plugins were successfully loaded from directory: {}. The server might not have any upscaling capabilities.",
+                plugins_dir_path_str
+            );
         }
 
         Ok(PluginManager {
@@ -281,7 +284,10 @@ impl PluginManager {
         for i in 0..num_engines {
             let c_engine_info_ptr = get_engine_info_fn(i);
             if c_engine_info_ptr.is_null() {
-                return Err(format!("Plugin at {:?} returned NULL from upsclr_plugin_get_engine_info for engine index {}", path, i));
+                return Err(format!(
+                    "Plugin at {:?} returned NULL from upsclr_plugin_get_engine_info for engine index {}",
+                    path, i
+                ));
             }
             let c_engine_info = &*c_engine_info_ptr; // Unsafe dereference.
             engines_rs.push(EngineInfo {

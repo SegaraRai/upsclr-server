@@ -11,9 +11,9 @@ mod plugin_ffi;
 mod plugin_manager;
 
 use axum::{
+    Router,
     extract::DefaultBodyLimit,
     routing::{delete, get, post},
-    Router,
 };
 use instance_manager::InstanceManager;
 use plugin_manager::PluginManager;
@@ -49,7 +49,10 @@ async fn main() {
         Ok(pm) => Arc::new(pm),
         Err(e) => {
             // If plugin loading fails critically, the server might be useless.
-            tracing::error!("FATAL: Failed to initialize PluginManager: {:?}. Server cannot operate without plugins.", e);
+            tracing::error!(
+                "FATAL: Failed to initialize PluginManager: {:?}. Server cannot operate without plugins.",
+                e
+            );
             eprintln!("FATAL: Plugin initialization failed. See logs for details. Exiting.");
             std::process::exit(1); // Exit if no plugins can be loaded.
         }

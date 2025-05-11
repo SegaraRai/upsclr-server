@@ -3,9 +3,9 @@
 // conversion into HTTP responses.
 
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde_json::json; // For creating JSON error bodies
 

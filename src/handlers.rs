@@ -3,7 +3,7 @@
 // Includes handlers that use the combined state tuple (SharedPluginManager, SharedInstanceManager).
 
 use crate::{
-    error::{lock_mutex_app_error, AppError},
+    error::{AppError, lock_mutex_app_error},
     headers,
     instance_manager::InstanceManager,
     models::*,
@@ -11,10 +11,10 @@ use crate::{
     plugin_manager::PluginManager,
 };
 use axum::{
-    extract::{Multipart, Path, Query, State},
-    http::{header, StatusCode},
-    response::{IntoResponse, Response},
     Json,
+    extract::{Multipart, Path, Query, State},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use axum_extra::TypedHeader;
 use std::sync::{Arc, Mutex};
@@ -102,122 +102,134 @@ fn decode_input_image(
     content_type_str: Option<&str>,
 ) -> Result<(Vec<u8>, u32, u32, u8, plugin_ffi::UpsclrColorFormat), AppError> {
     use byteorder::{ByteOrder, LittleEndian};
-    use image::DynamicImage;
 
-    match content_type_str {
-       Some("image/jpeg") | Some("image/png") | Some("image/webp") => {
-           // Determine image format from content type string.
-           let img_format_hint = match content_type_str {
-               Some("image/jpeg") => image::ImageFormat::Jpeg,
-               Some("image/png") => image::ImageFormat::Png,
-               Some("image/webp") => image::ImageFormat::WebP,
-               _ => return Err(AppError::ImageProcessingError("Internal error: Mismatched content type in image decoder path.".to_string())), // Should not happen
-           };
+    let media_type = content_type_str.map(|s| s[0..s.find(';').unwrap_or(s.len())].trim());
 
-           let dyn_img: DynamicImage = image::load_from_memory_with_format(file_data, img_format_hint)
-               .map_err(|e| AppError::ImageProcessingError(format!("Failed to decode image (format: {:?}): {}", img_format_hint, e)))?;
+    match media_type {
+        Some("image/jpeg") | Some("image/png") | Some("image/webp") | None => {
+            // Determine image format from content type string.
+            let img_format_hint = match media_type {
+                Some("image/jpeg") => Some(image::ImageFormat::Jpeg),
+                Some("image/png") => Some(image::ImageFormat::Png),
+                Some("image/webp") => Some(image::ImageFormat::WebP),
+                _ => None,
+            };
 
-           let width = dyn_img.width();
-           let height = dyn_img.height();
-           let channels = if dyn_img.color().has_alpha() {
-                4
-              } else {
-                3
-           };
+            let dyn_img = if let Some(format) = img_format_hint {
+                image::load_from_memory_with_format(file_data, format).map_err(|e| {
+                    AppError::ImageProcessingError(format!(
+                        "Failed to decode image (format: {:?}): {}",
+                        format, e
+                    ))
+                })?
+            } else {
+                image::load_from_memory(file_data).map_err(|e| {
+                    AppError::ImageProcessingError(format!(
+                        "Failed to auto-detect and decode image: {}",
+                        e
+                    ))
+                })?
+            };
 
-           let data_vec = if channels == 3 {
-               dyn_img.to_rgb8().into_raw()
-           } else {
-               dyn_img.to_rgba8().into_raw()
-           };
-           Ok((data_vec, width, height, channels, plugin_ffi::UpsclrColorFormat::Rgb))
-       }
-       Some(ct) if ct.starts_with("image/x-raw-bitmap") => {
-           // Parse the 16-byte header for custom "image/x-raw-bitmap" format.
-           // Header: ["R"]["B"](2B), ColorFormat(1B), Channels(1B), DataSize(4B LE), Width(4B LE), Height(4B LE)
-           if file_data.len() < 16 {
-               return Err(AppError::ImageProcessingError(
-                   "x-raw-bitmap data is too short for its 16-byte header.".to_string(),
-               ));
-           }
+            let width = dyn_img.width();
+            let height = dyn_img.height();
+            let channels = if dyn_img.color().has_alpha() { 4 } else { 3 };
 
-           if &file_data[0..2] != b"RB" { // Magic bytes check.
-               return Err(AppError::ImageProcessingError(
-                   "Invalid magic bytes for x-raw-bitmap. Expected 'RB'.".to_string(),
-               ));
-           }
+            let data_vec = if channels == 3 {
+                dyn_img.to_rgb8().into_raw()
+            } else {
+                dyn_img.to_rgba8().into_raw()
+            };
+            Ok((
+                data_vec,
+                width,
+                height,
+                channels,
+                plugin_ffi::UpsclrColorFormat::Rgb,
+            ))
+        }
+        Some("image/x-raw-bitmap") => {
+            // Parse the 16-byte header for custom "image/x-raw-bitmap" format.
+            // Header: ["R"]["B"](2B), ColorFormat(1B), Channels(1B), DataSize(4B LE), Width(4B LE), Height(4B LE)
+            if file_data.len() < 16 {
+                return Err(AppError::ImageProcessingError(
+                    "x-raw-bitmap data is too short for its 16-byte header.".to_string(),
+                ));
+            }
 
-           let header_color_format_byte = file_data[2]; // 0x01 for RGB/RGBA, 0x02 for BGR/BGRA
-           let header_channels_byte = file_data[3];     // 3 for RGB/BGR, 4 for RGBA/BGRA
-           let data_size_from_header = LittleEndian::read_u32(&file_data[4..8]); // Size of pixel data *after* header
-           let width = LittleEndian::read_u32(&file_data[8..12]);
-           let height = LittleEndian::read_u32(&file_data[12..16]);
+            if &file_data[0..2] != b"RB" {
+                // Magic bytes check.
+                return Err(AppError::ImageProcessingError(
+                    "Invalid magic bytes for x-raw-bitmap. Expected 'RB'.".to_string(),
+                ));
+            }
 
-           if width == 0 || height == 0 {
-               return Err(AppError::ImageProcessingError("x-raw-bitmap header indicates zero width or height.".to_string()));
-           }
-           if header_channels_byte != 3 && header_channels_byte != 4 {
+            let header_color_format_byte = file_data[2]; // 0x01 for RGB/RGBA, 0x02 for BGR/BGRA
+            let header_channels_byte = file_data[3]; // 3 for RGB/BGR, 4 for RGBA/BGRA
+            let data_size_from_header = LittleEndian::read_u32(&file_data[4..8]); // Size of pixel data *after* header
+            let width = LittleEndian::read_u32(&file_data[8..12]);
+            let height = LittleEndian::read_u32(&file_data[12..16]);
+
+            if width == 0 || height == 0 {
+                return Err(AppError::ImageProcessingError(
+                    "x-raw-bitmap header indicates zero width or height.".to_string(),
+                ));
+            }
+            if header_channels_byte != 3 && header_channels_byte != 4 {
                 return Err(AppError::ImageProcessingError(format!(
-                   "x-raw-bitmap header specifies an unsupported channel count: {}. Expected 3 or 4.", header_channels_byte
-               )));
-           }
+                    "x-raw-bitmap header specifies an unsupported channel count: {}. Expected 3 or 4.",
+                    header_channels_byte
+                )));
+            }
 
-           // Map header's ColorFormat byte to the plugin's plugin_ffi::UpsclrColorFormat enum.
-           let plugin_color_format = match header_color_format_byte {
-               0x01 => plugin_ffi::UpsclrColorFormat::Rgb,  // Covers RGB and RGBA (plugin gets channels separately)
-               0x02 => plugin_ffi::UpsclrColorFormat::Bgr,  // Covers BGR and BGRA
-               invalid_byte => return Err(AppError::ImageProcessingError(format!(
-                   "Invalid ColorFormat byte (0x{:02X}) in x-raw-bitmap header. Expected 0x01 or 0x02.", invalid_byte
-               ))),
-           };
+            // Map header's ColorFormat byte to the plugin's plugin_ffi::UpsclrColorFormat enum.
+            let plugin_color_format = match header_color_format_byte {
+                0x01 => plugin_ffi::UpsclrColorFormat::Rgb, // Covers RGB and RGBA (plugin gets channels separately)
+                0x02 => plugin_ffi::UpsclrColorFormat::Bgr, // Covers BGR and BGRA
+                invalid_byte => {
+                    return Err(AppError::ImageProcessingError(format!(
+                        "Invalid ColorFormat byte (0x{:02X}) in x-raw-bitmap header. Expected 0x01 or 0x02.",
+                        invalid_byte
+                    )));
+                }
+            };
 
-           // Validate DataSize from header against calculated size and actual payload size.
-           let calculated_pixel_data_size = (width as usize)
-               .saturating_mul(height as usize)
-               .saturating_mul(header_channels_byte as usize);
+            // Validate DataSize from header against calculated size and actual payload size.
+            let calculated_pixel_data_size = (width as usize)
+                .saturating_mul(height as usize)
+                .saturating_mul(header_channels_byte as usize);
 
-           if data_size_from_header as usize != calculated_pixel_data_size {
+            if data_size_from_header as usize != calculated_pixel_data_size {
                 return Err(AppError::ImageProcessingError(format!(
-                   "x-raw-bitmap DataSize in header ({}) does not match calculated size ({}) from WxHxC.",
-                   data_size_from_header, calculated_pixel_data_size
-               )));
-           }
+                    "x-raw-bitmap DataSize in header ({}) does not match calculated size ({}) from WxHxC.",
+                    data_size_from_header, calculated_pixel_data_size
+                )));
+            }
 
-           let expected_total_size = 16 + data_size_from_header as usize;
-           if file_data.len() != expected_total_size {
-               return Err(AppError::ImageProcessingError(format!(
-                   "x-raw-bitmap total file size ({}) does not match expected size based on header ({}).",
-                   file_data.len(), expected_total_size
-               )));
-           }
+            let expected_total_size = 16 + data_size_from_header as usize;
+            if file_data.len() != expected_total_size {
+                return Err(AppError::ImageProcessingError(format!(
+                    "x-raw-bitmap total file size ({}) does not match expected size based on header ({}).",
+                    file_data.len(),
+                    expected_total_size
+                )));
+            }
 
-           // Extract pixel data (skip the 16-byte header).
-           let data_vec = file_data[16..].to_vec();
+            // Extract pixel data (skip the 16-byte header).
+            let data_vec = file_data[16..].to_vec();
 
-           Ok((data_vec, width, height, header_channels_byte, plugin_color_format))
-       }
-       None => {
-           // Try to auto-detect format if no content type was specified.
-           let dyn_img: DynamicImage = image::load_from_memory(file_data)
-               .map_err(|e| AppError::ImageProcessingError(format!("Failed to auto-detect and decode image: {}", e)))?;
-
-           let width = dyn_img.width();
-           let height = dyn_img.height();
-           let channels = if dyn_img.color().has_alpha() { 4 } else { 3 };
-           let data_vec = if channels == 3 {
-               dyn_img.to_rgb8().into_raw()
-           } else {
-               dyn_img.to_rgba8().into_raw()
-           };
-
-           Ok((data_vec, width, height, channels, plugin_ffi::UpsclrColorFormat::Rgb))
-       }
-       Some(unknown_content_type) => {
-           Err(AppError::UnsupportedMediaType(format!(
-               "Content type '{}' is not supported. Expected 'image/jpeg', 'image/png', 'image/webp', or 'image/x-raw-bitmap'.",
-               unknown_content_type
-           )))
-       }
+            Ok((
+                data_vec,
+                width,
+                height,
+                header_channels_byte,
+                plugin_color_format,
+            ))
+        }
+        Some(unknown_content_type) => Err(AppError::UnsupportedMediaType(format!(
+            "Content type '{}' is not supported. Expected 'image/jpeg', 'image/png', 'image/webp', or 'image/x-raw-bitmap'.",
+            unknown_content_type
+        ))),
     }
 }
 
@@ -243,7 +255,7 @@ fn encode_output_image(
                     return Err(AppError::ImageProcessingError(format!(
                         "Unsupported channel count ({}).",
                         channels
-                    )))
+                    )));
                 }
             };
 
@@ -361,8 +373,10 @@ pub async fn create_instance_handler(
 ) -> Result<Json<CreateInstanceResponse>, AppError> {
     let dry_run_active = query_params.dry_run.unwrap_or(false); // Default to false
     tracing::info!(
-       "Attempting to create/validate instance for plugin_id: '{}', engine_name: '{}', dry_run: {}",
-       payload.plugin_id, payload.engine_name, dry_run_active
+        "Attempting to create/validate instance for plugin_id: '{}', engine_name: '{}', dry_run: {}",
+        payload.plugin_id,
+        payload.engine_name,
+        dry_run_active
     );
 
     // Find the specified plugin by its ID.
@@ -637,7 +651,7 @@ pub async fn upscale_image(
             None => {
                 return Err(AppError::BadRequest(
                     "Missing 'file' field in multipart request.".to_string(),
-                ))
+                ));
             }
         }
     };
@@ -668,7 +682,7 @@ pub async fn upscale_image(
     // --- Decode Input Image (handles standard formats and custom x-raw-bitmap) ---
     tracing::debug!("Decoding input image...");
     let (in_data_vec, in_width, in_height, in_channels, in_color_format_plugin) =
-        decode_input_image(&file_data, input_content_type.as_deref())?; // Use our decode_input_image function
+        decode_input_image(&file_data, input_content_type.as_deref())?;
     tracing::debug!(
         "Input image decoded: {}x{} {}ch, format: {:?}",
         in_width,
@@ -696,8 +710,9 @@ pub async fn upscale_image(
             out_size
         );
         return Err(AppError::UnprocessableContent(format!(
-           "Calculated output image dimensions ({}x{}) result in an excessively large buffer requirement.", out_width, out_height
-       )));
+            "Calculated output image dimensions ({}x{}) result in an excessively large buffer requirement.",
+            out_width, out_height
+        )));
     }
 
     // --- Determine Plugin's Output Format based on Client's Accept Header ---

@@ -5,6 +5,7 @@ use std::os::raw::{c_char, c_void};
 
 // char8_t is specified as UTF-8. In C, this is typically 'char'.
 // For FFI, Rust's *const c_char (which is *const i8) is appropriate for C 'char *'.
+#[allow(non_camel_case_types)]
 pub type c_char8_t = c_char;
 
 #[repr(C)]
