@@ -1,6 +1,6 @@
 # Upsclr Server
 
-A server for upscaling images using various AI-powered plugins.
+A server for upscaling images using various plugins.
 
 ## Features
 
@@ -63,7 +63,7 @@ The server can be configured using command-line arguments or environment variabl
 
 ### Examples
 
-Start the server with default settings (localhost:3000):
+Start the server with default settings (localhost:6795):
 
 ```sh
 upsclr-server
