@@ -233,7 +233,7 @@ fn encode_output_image(
             .map_err(|e| AppError::ImageProcessingError(format!("PNG encoding failed: {}", e)))?;
 
             Ok((
-                AppendHeaders([(header::CONTENT_TYPE, "image/png")]),
+                [(header::CONTENT_TYPE, "image/png")],
                 buffer.into_inner(), // Bytes of the encoded PNG.
             )
                 .into_response())
@@ -263,11 +263,7 @@ fn encode_output_image(
                 .map_err(|e| {
                     AppError::ImageProcessingError(format!("JPEG encoding failed: {}", e))
                 })?;
-            Ok((
-                AppendHeaders([(header::CONTENT_TYPE, "image/jpeg")]),
-                buffer.into_inner(),
-            )
-                .into_response())
+            Ok(([(header::CONTENT_TYPE, "image/jpeg")], buffer.into_inner()).into_response())
         }
         OutputFormat::Raw { color_format } => {
             tracing::debug!("Encoding output as x-raw-bitmap.");
@@ -287,7 +283,7 @@ fn encode_output_image(
             raw_bitmap_data.extend_from_slice(raw_pixel_data); // The pixel data itself
 
             Ok((
-                AppendHeaders([(header::CONTENT_TYPE, "image/x-raw-bitmap")]),
+                [(header::CONTENT_TYPE, "image/x-raw-bitmap")],
                 raw_bitmap_data,
             )
                 .into_response())
