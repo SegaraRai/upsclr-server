@@ -101,9 +101,9 @@ pub struct EngineInfo {
     pub name: String,
     pub description: String,
     pub version: String,
-    pub config_json_schema: serde_json::Value, // JSON schema as a string.
-    pub plugin_id: String,                     // ID of the plugin this engine belongs to.
-    pub engine_index_in_plugin: usize,         // Original index within the plugin's list.
+    pub config_schema: serde_json::Value, // JSON schema as a string.
+    pub plugin_id: String,                // ID of the plugin this engine belongs to.
+    pub engine_index_in_plugin: usize,    // Original index within the plugin's list.
 }
 
 // Manages a collection of all plugins loaded by the server.
@@ -135,7 +135,7 @@ impl PluginManager {
             plugins_dir_path_str
         );
 
-        let entries = std::fs::read_dir(plugins_dir_path).map_err(|e| AppError::IoError(e))?;
+        let entries = std::fs::read_dir(plugins_dir_path).map_err(AppError::IoError)?;
 
         for entry_result in entries {
             let entry = entry_result.map_err(AppError::IoError)?;
@@ -334,7 +334,7 @@ impl PluginManager {
                 version: Self::c_str_to_rust_string(c_engine_info.version).map_err(|e| {
                     format!("Invalid engine version (idx {}) from {:?}: {}", i, path, e)
                 })?,
-                config_json_schema: serde_json::from_str(
+                config_schema: serde_json::from_str(
                     &Self::c_str_to_rust_string(c_engine_info.config_json_schema).map_err(|e| {
                         format!("Invalid engine schema (idx {}) from {:?}: {}", i, path, e)
                     })?,
