@@ -10,12 +10,30 @@ use std::ffi::{CStr, OsStr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub struct PluginLibrary {
+    _lib: Library,
+    id: String,
+    #[allow(unused)]
+    upsclr_plugin_initialize: unsafe extern "C" fn() -> plugin_ffi::UpsclrErrorCode,
+    upsclr_plugin_shutdown: unsafe extern "C" fn() -> plugin_ffi::UpsclrErrorCode,
+}
+
+impl Drop for PluginLibrary {
+    fn drop(&mut self) {
+        // Call the shutdown function when the library is dropped.
+        tracing::info!("Dropping plugin library: {}", self.id);
+        unsafe {
+            (self.upsclr_plugin_shutdown)();
+        }
+        tracing::info!("Dropped plugin library: {}", self.id);
+    }
+}
+
 // Represents a successfully loaded plugin and its capabilities.
 // This struct holds the loaded library and symbols to its functions.
 #[derive(Clone)]
 pub struct LoadedPlugin {
-    #[allow(unused)]
-    lib: Arc<Library>, // Arc to keep the library loaded as long as this struct (or clones) exist.
+    _lib: Arc<PluginLibrary>, // Arc to keep the library loaded as long as this struct (or clones) exist.
 
     pub id: String,    // Unique identifier, typically the plugin's filename.
     pub path: PathBuf, // Filesystem path to the loaded library.
@@ -182,10 +200,8 @@ impl PluginManager {
     // This is `unsafe` due to FFI interactions.
     unsafe fn load_plugin_from_path(path: &Path) -> Result<Arc<LoadedPlugin>, String> {
         // Load the shared library.
-        let lib = Arc::new(
-            Library::new(path)
-                .map_err(|e| format!("Failed to load shared library from {:?}: {}", path, e))?,
-        );
+        let lib = Library::new(path)
+            .map_err(|e| format!("Failed to load shared library from {:?}: {}", path, e))?;
 
         // Macro to simplify symbol loading and error mapping.
         macro_rules! get_symbol {
@@ -202,6 +218,10 @@ impl PluginManager {
         }
 
         // Load all required function pointers from the library.
+        let initialize_fn: Symbol<unsafe extern "C" fn() -> plugin_ffi::UpsclrErrorCode> =
+            get_symbol!(lib, b"upsclr_plugin_initialize\0")?;
+        let shutdown_fn: Symbol<unsafe extern "C" fn() -> plugin_ffi::UpsclrErrorCode> =
+            get_symbol!(lib, b"upsclr_plugin_shutdown\0")?;
         let get_info_fn: Symbol<unsafe extern "C" fn() -> *const plugin_ffi::UpsclrPluginInfo> =
             get_symbol!(lib, b"upsclr_plugin_get_info\0")?;
         let count_engines_fn: Symbol<unsafe extern "C" fn() -> usize> =
@@ -251,6 +271,15 @@ impl PluginManager {
                 plugin_ffi::UpsclrColorFormat,
             ) -> plugin_ffi::UpsclrErrorCode,
         > = get_symbol!(lib, b"upsclr_plugin_upscale\0")?;
+
+        // Call `upsclr_plugin_initialize` to initialize the plugin.
+        let init_result = initialize_fn();
+        if init_result != plugin_ffi::UpsclrErrorCode::Success {
+            return Err(format!(
+                "Plugin at {:?} failed to initialize with error code: {:?}",
+                path, init_result
+            ));
+        }
 
         // Call `upsclr_plugin_get_info` to retrieve basic plugin metadata.
         let c_plugin_info_ptr = get_info_fn();
@@ -317,6 +346,8 @@ impl PluginManager {
         }
 
         // Extract raw function pointers before building the struct
+        let initialize_fn_ptr = *initialize_fn;
+        let shutdown_fn_ptr = *shutdown_fn;
         let get_info_fn_ptr = *get_info_fn;
         let count_engines_fn_ptr = *count_engines_fn;
         let get_engine_info_fn_ptr = *get_engine_info_fn;
@@ -327,9 +358,16 @@ impl PluginManager {
         let preload_fn_ptr = *preload_fn;
         let upscale_fn_ptr = *upscale_fn;
 
+        let plugin_lib_arc = Arc::new(PluginLibrary {
+            _lib: lib,
+            id: plugin_id.clone(),
+            upsclr_plugin_initialize: initialize_fn_ptr,
+            upsclr_plugin_shutdown: shutdown_fn_ptr,
+        });
+
         // Construct and return the LoadedPlugin struct, now populated with function pointers and metadata.
         Ok(Arc::new(LoadedPlugin {
-            lib,
+            _lib: plugin_lib_arc,
             id: plugin_id,
             path: path.to_path_buf(),
             plugin_info: plugin_info_rs,

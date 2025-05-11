@@ -42,6 +42,7 @@ impl Drop for ActiveInstance {
                 (self.plugin.upsclr_plugin_destroy_engine_instance)(self.instance_ptr);
             }
         }
+        tracing::info!("Dropped engine instance: {}", self.uuid);
     }
 }
 
@@ -142,5 +143,11 @@ impl InstanceManager {
             // If instance not found, it's a client error (or race condition).
             Err(AppError::InstanceNotFound) // Use the specific error
         }
+    }
+
+    pub fn cleanup(&mut self) {
+        // This will drop all instances, invoking their Drop implementation.
+        self.instances.clear();
+        tracing::info!("Cleared all engine instances.");
     }
 }

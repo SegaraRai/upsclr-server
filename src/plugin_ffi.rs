@@ -44,12 +44,15 @@ pub struct UpsclrEngineConfigValidationResult {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)] // Make it fully usable in Rust comparisons
 #[non_exhaustive]
 pub enum UpsclrErrorCode {
-    Success = 0,         // UPSCLR_SUCCESS
-    InvalidArgument = 1, // UPSCLR_ERROR_INVALID_ARGUMENT
-    EngineNotFound = 2,  // UPSCLR_ERROR_ENGINE_NOT_FOUND
-    PreloadFailed = 3,   // UPSCLR_ERROR_PRELOAD_FAILED
-    UpscaleFailed = 4,   // UPSCLR_ERROR_UPSCALE_FAILED
-    Other = 9999,        // UPSCLR_ERROR_OTHER
+    Success = 0,                  // UPSCLR_SUCCESS
+    PluginNotInitialized = 1,     // UPSCLR_ERROR_PLUGIN_NOT_INITIALIZED
+    PluginAlreadyInitialized = 2, // UPSCLR_ERROR_PLUGIN_ALREADY_INITIALIZED
+    PluginAlreadyDestroyed = 3,   // UPSCLR_ERROR_PLUGIN_ALREADY_DESTROYED
+    InvalidArgument = 4,          // UPSCLR_ERROR_INVALID_ARGUMENT
+    EngineNotFound = 5,           // UPSCLR_ERROR_ENGINE_NOT_FOUND
+    PreloadFailed = 6,            // UPSCLR_ERROR_PRELOAD_FAILED
+    UpscaleFailed = 7,            // UPSCLR_ERROR_UPSCALE_FAILED
+    Other = 9999,                 // UPSCLR_ERROR_OTHER
 }
 
 #[repr(C)]
