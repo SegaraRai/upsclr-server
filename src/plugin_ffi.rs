@@ -46,7 +46,8 @@ pub enum UpsclrErrorCode {
     Success = 0,         // UPSCLR_SUCCESS
     InvalidArgument = 1, // UPSCLR_ERROR_INVALID_ARGUMENT
     EngineNotFound = 2,  // UPSCLR_ERROR_ENGINE_NOT_FOUND
-    UpscaleFailed = 3,   // UPSCLR_ERROR_UPSCALE_FAILED
+    PreloadFailed = 3,   // UPSCLR_ERROR_PRELOAD_FAILED
+    UpscaleFailed = 4,   // UPSCLR_ERROR_UPSCALE_FAILED
     Other = 9999,        // UPSCLR_ERROR_OTHER
 }
 

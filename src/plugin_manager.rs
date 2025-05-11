@@ -29,13 +29,13 @@ pub struct LoadedPlugin {
     pub upsclr_plugin_count_engines: unsafe extern "C" fn() -> usize,
     pub upsclr_plugin_get_engine_info:
         unsafe extern "C" fn(engine_index: usize) -> *const plugin_ffi::UpsclrEngineInfo,
-    pub upsclr_validate_engine_config:
+    pub upsclr_plugin_validate_engine_config:
         unsafe extern "C" fn(
             engine_index: usize,
             config_json: *const plugin_ffi::c_char8_t,
             config_json_length: usize,
         ) -> *const plugin_ffi::UpsclrEngineConfigValidationResult,
-    pub upsclr_free_validation_result:
+    pub upsclr_plugin_free_validation_result:
         unsafe extern "C" fn(result: *const plugin_ffi::UpsclrEngineConfigValidationResult),
     pub upsclr_plugin_create_engine_instance:
         unsafe extern "C" fn(
@@ -45,11 +45,11 @@ pub struct LoadedPlugin {
         ) -> *mut plugin_ffi::UpsclrEngineInstance,
     pub upsclr_plugin_destroy_engine_instance:
         unsafe extern "C" fn(instance: *mut plugin_ffi::UpsclrEngineInstance),
-    pub upsclr_preload_upscale: unsafe extern "C" fn(
+    pub upsclr_plugin_preload_upscale: unsafe extern "C" fn(
         instance: *mut plugin_ffi::UpsclrEngineInstance,
         scale: i32,
     ) -> plugin_ffi::UpsclrErrorCode,
-    pub upsclr_upscale: unsafe extern "C" fn(
+    pub upsclr_plugin_upscale: unsafe extern "C" fn(
         instance: *mut plugin_ffi::UpsclrEngineInstance,
         scale: i32,
         in_data: *const u8,
@@ -83,9 +83,9 @@ pub struct EngineInfo {
     pub name: String,
     pub description: String,
     pub version: String,
-    pub config_json_schema: String,    // JSON schema as a string.
-    pub plugin_id: String,             // ID of the plugin this engine belongs to.
-    pub engine_index_in_plugin: usize, // Original index within the plugin's list.
+    pub config_json_schema: serde_json::Value, // JSON schema as a string.
+    pub plugin_id: String,                     // ID of the plugin this engine belongs to.
+    pub engine_index_in_plugin: usize,         // Original index within the plugin's list.
 }
 
 // Manages a collection of all plugins loaded by the server.
@@ -213,10 +213,10 @@ impl PluginManager {
                 usize,
             )
                 -> *const plugin_ffi::UpsclrEngineConfigValidationResult,
-        > = get_symbol!(lib, b"upsclr_validate_engine_config\0")?;
+        > = get_symbol!(lib, b"upsclr_plugin_validate_engine_config\0")?;
         let free_validation_result_fn: Symbol<
             unsafe extern "C" fn(*const plugin_ffi::UpsclrEngineConfigValidationResult),
-        > = get_symbol!(lib, b"upsclr_free_validation_result\0")?;
+        > = get_symbol!(lib, b"upsclr_plugin_free_validation_result\0")?;
         let create_instance_fn: Symbol<
             unsafe extern "C" fn(
                 usize,
@@ -232,7 +232,7 @@ impl PluginManager {
                 *mut plugin_ffi::UpsclrEngineInstance,
                 i32,
             ) -> plugin_ffi::UpsclrErrorCode,
-        > = get_symbol!(lib, b"upsclr_preload_upscale\0")?;
+        > = get_symbol!(lib, b"upsclr_plugin_preload_upscale\0")?;
         let upscale_fn: Symbol<
             unsafe extern "C" fn(
                 *mut plugin_ffi::UpsclrEngineInstance,
@@ -247,7 +247,7 @@ impl PluginManager {
                 usize,
                 plugin_ffi::UpsclrColorFormat,
             ) -> plugin_ffi::UpsclrErrorCode,
-        > = get_symbol!(lib, b"upsclr_upscale\0")?;
+        > = get_symbol!(lib, b"upsclr_plugin_upscale\0")?;
 
         // Call `upsclr_plugin_get_info` to retrieve basic plugin metadata.
         let c_plugin_info_ptr = get_info_fn();
@@ -299,10 +299,12 @@ impl PluginManager {
                 version: Self::c_str_to_rust_string(c_engine_info.version).map_err(|e| {
                     format!("Invalid engine version (idx {}) from {:?}: {}", i, path, e)
                 })?,
-                config_json_schema: Self::c_str_to_rust_string(c_engine_info.config_json_schema)
-                    .map_err(|e| {
+                config_json_schema: serde_json::from_str(
+                    &Self::c_str_to_rust_string(c_engine_info.config_json_schema).map_err(|e| {
                         format!("Invalid engine schema (idx {}) from {:?}: {}", i, path, e)
                     })?,
+                )
+                .map_err(|e| format!("Invalid JSON schema (idx {}) from {:?}: {:?}", i, path, e))?,
                 plugin_id: plugin_id.clone(),
                 engine_index_in_plugin: i,
             });
@@ -330,12 +332,12 @@ impl PluginManager {
             upsclr_plugin_get_info: get_info_fn_ptr,
             upsclr_plugin_count_engines: count_engines_fn_ptr,
             upsclr_plugin_get_engine_info: get_engine_info_fn_ptr,
-            upsclr_validate_engine_config: validate_config_fn_ptr,
-            upsclr_free_validation_result: free_validation_result_fn_ptr,
+            upsclr_plugin_validate_engine_config: validate_config_fn_ptr,
+            upsclr_plugin_free_validation_result: free_validation_result_fn_ptr,
             upsclr_plugin_create_engine_instance: create_instance_fn_ptr,
             upsclr_plugin_destroy_engine_instance: destroy_instance_fn_ptr,
-            upsclr_preload_upscale: preload_fn_ptr,
-            upsclr_upscale: upscale_fn_ptr,
+            upsclr_plugin_preload_upscale: preload_fn_ptr,
+            upsclr_plugin_upscale: upscale_fn_ptr,
         }))
     }
 

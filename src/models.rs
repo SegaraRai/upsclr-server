@@ -18,21 +18,21 @@ pub struct PluginDescriptionResponse {
 // Request body structure for POST /instances to create a new engine instance.
 #[derive(Deserialize, Debug)]
 pub struct CreateInstanceRequest {
-   // Unique identifier for the plugin (e.g., its filename or a name from its metadata).
+   // Unique identifier for the plugin.
    pub plugin_id: String,
    // Name of the specific engine within the plugin to instantiate.
    pub engine_name: String,
    // Engine-specific configuration, passed as a flexible JSON value.
    // The plugin itself (via its JSON schema) defines the structure of this config.
-   pub config_json: serde_json::Value,
+   pub config: serde_json::Value,
 }
 
 // Response structure for POST /instances.
 #[derive(Serialize, Debug)]
 pub struct CreateInstanceResponse {
    // The unique UUID assigned to the newly created (or validated) engine instance.
-   // Will be Uuid::nil() if dry_run was true and no instance was actually created.
-   pub instance_id: Uuid,
+   // Will be None if dry_run was true and no instance was actually created.
+   pub instance_id: Option<Uuid>,
    // Provides the result of the configuration validation.
    // This is always present:
    // - For dry_run=true, it's the primary result.

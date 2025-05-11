@@ -344,14 +344,14 @@ pub async fn create_instance_handler(
             ))
         })?;
 
-    let config_json_str = payload.config_json.to_string();
+    let config_json_str = payload.config.to_string();
     let config_json_c_str =
         std::ffi::CString::new(config_json_str.as_str()).map_err(AppError::CStringError)?;
 
     // --- Perform Configuration Validation via Plugin ---
     // This is an unsafe FFI call.
     let validation_c_result_ptr = unsafe {
-        (plugin_arc.upsclr_validate_engine_config)(
+        (plugin_arc.upsclr_plugin_validate_engine_config)(
             engine_index,
             config_json_c_str.as_ptr(),
             config_json_c_str.as_bytes().len(), // Length without null terminator
@@ -392,7 +392,7 @@ pub async fn create_instance_handler(
         };
         // Important: Free the validation result memory allocated by the plugin.
         unsafe {
-            (plugin_arc.upsclr_free_validation_result)(validation_c_result_ptr);
+            (plugin_arc.upsclr_plugin_free_validation_result)(validation_c_result_ptr);
         }
         Some(desc)
     } else {
@@ -414,7 +414,7 @@ pub async fn create_instance_handler(
     if dry_run_active {
         tracing::info!("Dry run completed for instance creation.");
         return Ok(Json(CreateInstanceResponse {
-            instance_id: Uuid::nil(), // No instance ID for dry run.
+            instance_id: None,
             validation: validation_result_desc,
         }));
     }
@@ -443,7 +443,7 @@ pub async fn create_instance_handler(
         active_instance_arc.uuid
     );
     Ok(Json(CreateInstanceResponse {
-        instance_id: active_instance_arc.uuid,
+        instance_id: Some(active_instance_arc.uuid),
         validation: validation_result_desc, // Include any warnings from validation.
     }))
 }
@@ -484,7 +484,7 @@ pub async fn preload_instance(
             // Convert the integer back to a raw pointer inside the new thread
             let instance_ptr = instance_ptr_value as *mut plugin_ffi::UpsclrEngineInstance;
             // This block is unsafe due to FFI call.
-            (plugin_arc.upsclr_preload_upscale)(instance_ptr, scale)
+            (plugin_arc.upsclr_plugin_preload_upscale)(instance_ptr, scale)
         }
     })
     .await
@@ -699,7 +699,7 @@ pub async fn upscale_image(
             let instance_ptr = instance_ptr_value as *mut plugin_ffi::UpsclrEngineInstance;
 
             // This block is unsafe due to FFI call.
-            let result = (upscale_task_plugin_arc.upsclr_upscale)(
+            let result = (upscale_task_plugin_arc.upsclr_plugin_upscale)(
                 instance_ptr,
                 upscale_scale_factor,
                 in_data_vec_for_task.as_ptr(), // Input image data
