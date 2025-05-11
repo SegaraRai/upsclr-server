@@ -118,7 +118,7 @@ UPSCLR_SERVER_HOST=0.0.0.0 UPSCLR_SERVER_PORT=8080 UPSCLR_SERVER_PLUGINS_DIR=/pa
     - `[].engine_name`: The name of the engine
 - `POST /instances` - Create a new upscaling engine instance
   - Query parameters:
-    - `dry_run`: Set to `1` or `true` to test the creation of an instance without actually creating it
+    - `dry_run` (optional): Set to `1` or `true` to test the creation of an instance without actually creating it
   - Request body (JSON):
     - `plugin_id`: The plugin that contains the upscaling engine
     - `engine_name`: The engine to use for upscaling
@@ -132,14 +132,20 @@ UPSCLR_SERVER_HOST=0.0.0.0 UPSCLR_SERVER_PORT=8080 UPSCLR_SERVER_PLUGINS_DIR=/pa
     - `validation.warning_messages`: A list of warnings
 - `DELETE /instances/{uuid}` - Delete an engine instance
   - No request body
+  - No response body
 - `POST /instances/{uuid}/preload?scale=N` - Preload upscaling resources
+  - Query parameters:
+    - `scale` (required): The scale factor for the upscaling
   - No request body
+  - No response body
 - `POST /instances/{uuid}/upscale?scale=N` - Upscale an image
+  - Query parameters:
+    - `scale` (required): The scale factor for the upscaling
   - Request headers:
-    - `Accept`: `image/png`, `image/jpeg`, `image/webp`, or `image/x-raw-bitmap`
-      - The `image/x-raw-bitmap` type is our custom type for raw bitmap images with 16-byte header
+    - `Accept` (required): `image/png`, `image/jpeg`, or `image/x-raw-bitmap`
+      - The `image/x-raw-bitmap` is our custom type for raw bitmap images with 16-byte header
   - Request body (Multipart form-data):
-    - `file`: The image file to be upscaled
+    - `file` (required): The image file to be upscaled. Currently supports `image/png`, `image/jpeg`, `image/webp`, and `image/x-raw-bitmap`.
   - Response body (image data):
     - The upscaled image in the requested format
 
