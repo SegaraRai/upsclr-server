@@ -18,6 +18,7 @@ use axum::{
 use instance_manager::InstanceManager;
 use plugin_manager::PluginManager;
 use std::sync::{Arc, Mutex};
+use tokio::signal;
 use tower_http::{
     cors::CorsLayer,                      // For Cross-Origin Resource Sharing
     trace::{DefaultMakeSpan, TraceLayer}, // For detailed request logging
@@ -138,10 +139,39 @@ async fn main() {
     };
 
     // Run the server.
-    if let Err(e) = axum::serve(listener, app.into_make_service()).await {
+    if let Err(e) = axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+    {
         tracing::error!("Server run error: {}", e);
         eprintln!("ERROR: Server shut down unexpectedly. Error: {}", e);
     }
 
     tracing::info!("upsclr-server has shut down.");
+
+    instance_manager_arc.lock().unwrap().cleanup();
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }
