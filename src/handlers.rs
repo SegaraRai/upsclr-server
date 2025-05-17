@@ -12,7 +12,8 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::{Multipart, Path, Query, State},
+    body::{self},
+    extract::{FromRequest, Multipart, Path, Query, Request, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -329,6 +330,87 @@ fn encode_output_image(
     }
 }
 
+// Helper function to extract image data from a multipart request
+async fn extract_multipart_image(request: Request) -> Result<(Vec<u8>, Option<String>), AppError> {
+    // Convert Request to Multipart
+    let mut multipart = Multipart::from_request(request, &())
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Failed to process multipart request: {}", e)))?;
+
+    let mut file_data_opt: Option<Vec<u8>> = None;
+    let mut content_type_opt: Option<String> = None;
+    let mut ignored_fields = 0;
+
+    // Loop through all fields to find "file" and ignore others
+    while let Some(field) = multipart.next_field().await? {
+        if field.name() == Some("file") {
+            if file_data_opt.is_some() {
+                // Found a second "file" field
+                tracing::warn!(
+                    "Multiple 'file' fields found in multipart request, using the last one"
+                );
+            }
+
+            let content_type_str = field.content_type().map(str::to_string);
+            tracing::debug!("Received file with content type: {:?}", content_type_str);
+            let data = field.bytes().await?.to_vec();
+            if data.is_empty() {
+                return Err(AppError::BadRequest(
+                    "Uploaded 'file' field is empty.".to_string(),
+                ));
+            }
+            file_data_opt = Some(data);
+            content_type_opt = content_type_str;
+        } else {
+            let field_name = field.name().unwrap_or("unnamed").to_string();
+            tracing::debug!("Ignoring multipart field: {}", field_name);
+            ignored_fields += 1;
+        }
+    }
+
+    if ignored_fields > 0 {
+        tracing::debug!(
+            "Ignored {} non-file fields in multipart request",
+            ignored_fields
+        );
+    }
+
+    match file_data_opt {
+        Some(data) => Ok((data, content_type_opt)),
+        None => Err(AppError::BadRequest(
+            "Missing 'file' field in multipart request.".to_string(),
+        )),
+    }
+}
+
+// Helper function to extract image data from a direct (non-multipart) request
+async fn extract_direct_image(
+    request: Request,
+    content_type: &str,
+) -> Result<(Vec<u8>, Option<String>), AppError> {
+    // Validate that Content-Type is a supported image format
+    if !content_type.starts_with("image/") && !content_type.starts_with("application/octet-stream")
+    {
+        return Err(AppError::UnsupportedMediaType(format!(
+            "Content-Type '{}' is not supported. Expected image/*, multipart/form-data, or application/octet-stream.",
+            content_type
+        )));
+    }
+
+    // Extract the body as bytes
+    let body = request.into_body();
+    let bytes = body::to_bytes(body, usize::MAX)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {}", e)))?;
+
+    if bytes.is_empty() {
+        return Err(AppError::BadRequest("Request body is empty.".to_string()));
+    }
+
+    // Return the bytes and content type
+    Ok((bytes.to_vec(), Some(content_type.to_string())))
+}
+
 // --- GET /plugins ---
 // Lists all loaded plugins and their available engines.
 pub async fn get_plugins(
@@ -590,7 +672,7 @@ pub async fn upscale_image(
     Path(uuid): Path<Uuid>,
     Query(params): Query<ScaleQueryParam>,
     TypedHeader(accept_header): TypedHeader<headers::Accept>,
-    mut multipart: Multipart,
+    request: Request,
 ) -> Result<Response, AppError> {
     if params.scale <= 1 {
         // Validate scale factor.
@@ -599,75 +681,31 @@ pub async fn upscale_image(
         ));
     }
 
+    let request_id = Uuid::new_v4();
+
     tracing::info!(
-        "Upscaling request for instance {}, scale {}",
+        "Received upscale request for instance {} with scale {} (req_id={})",
         uuid,
-        params.scale
+        params.scale,
+        request_id
     );
 
-    // --- Parse Multipart for "file" field ---
-    // Look for the "file" field, ignoring any other fields
-    let (file_data, input_content_type) = {
-        let mut file_data_opt: Option<Vec<u8>> = None;
-        let mut content_type_opt: Option<String> = None;
-        let mut ignored_fields = 0;
+    // Get the content type from the request headers
+    let content_type = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string(); // Clone the string to avoid borrowing issues
 
-        // Loop through all fields to find "file" and ignore others
-        while let Some(field) = multipart.next_field().await? {
-            if field.name() == Some("file") {
-                if file_data_opt.is_some() {
-                    // Found a second "file" field
-                    tracing::warn!(
-                        "Multiple 'file' fields found in multipart request, using the last one"
-                    );
-                }
-
-                let content_type_str = field.content_type().map(str::to_string);
-                tracing::debug!("Received file with content type: {:?}", content_type_str);
-                let data = field.bytes().await?.to_vec();
-                if data.is_empty() {
-                    return Err(AppError::BadRequest(
-                        "Uploaded 'file' field is empty.".to_string(),
-                    ));
-                }
-                file_data_opt = Some(data);
-                content_type_opt = content_type_str;
-            } else {
-                let field_name = field.name().unwrap_or("unnamed").to_string();
-                tracing::debug!("Ignoring multipart field: {}", field_name);
-                ignored_fields += 1;
-            }
-        }
-
-        if ignored_fields > 0 {
-            tracing::debug!(
-                "Ignored {} non-file fields in multipart request",
-                ignored_fields
-            );
-        }
-
-        match file_data_opt {
-            Some(data) => (data, content_type_opt),
-            None => {
-                return Err(AppError::BadRequest(
-                    "Missing 'file' field in multipart request.".to_string(),
-                ));
-            }
-        }
+    // --- Extract image data based on content type ---
+    let (file_data, input_content_type) = if content_type.starts_with("multipart/form-data") {
+        // Handle multipart/form-data
+        extract_multipart_image(request).await?
+    } else {
+        // Handle direct image upload (non-multipart)
+        extract_direct_image(request, &content_type).await?
     };
-    // Process any remaining fields (ignoring them) to drain the multipart stream
-    let mut extra_field_count = 0;
-    while let Some(field) = multipart.next_field().await? {
-        extra_field_count += 1;
-        let field_name = field.name().unwrap_or("unnamed").to_string();
-        tracing::warn!("Ignoring extra multipart field: {}", field_name);
-    }
-    if extra_field_count > 0 {
-        tracing::debug!(
-            "Ignored {} additional multipart fields after processing 'file'",
-            extra_field_count
-        );
-    }
 
     // --- Get Instance ---
     // Clone Arc<ActiveInstance> to be moved into the blocking task.
@@ -681,8 +719,16 @@ pub async fn upscale_image(
 
     // --- Decode Input Image (handles standard formats and custom x-raw-bitmap) ---
     tracing::debug!("Decoding input image...");
+    // Use a scope to ensure file_data can be dropped after decoding
     let (in_data_vec, in_width, in_height, in_channels, in_color_format_plugin) =
-        decode_input_image(&file_data, input_content_type.as_deref())?;
+        tokio::task::spawn_blocking(move || {
+            decode_input_image(&file_data, input_content_type.as_deref())
+        })
+        .await
+        .map_err(|e| {
+            AppError::InternalServerError(format!("Image decode task failed to execute: {}", e))
+        })??;
+
     tracing::debug!(
         "Input image decoded: {}x{} {}ch, format: {:?}",
         in_width,
@@ -736,13 +782,12 @@ pub async fn upscale_image(
     let upscale_task_plugin_arc = instance_arc.plugin.clone();
     let upscale_scale_factor = params.scale;
 
-    // Create separate vectors for use in the task
-    let in_data_vec_for_task = in_data_vec.clone();
-    let mut out_data_vec_for_task = vec![0; out_size]; // Create a fresh buffer for the task
-
     tracing::debug!("Spawning blocking task for upscaling operation...");
+
     // spawn_blocking returns a JoinHandle, which is a future we need to await
     let task_result = tokio::task::spawn_blocking(move || {
+        let mut out_data_vec = vec![0; out_size];
+
         unsafe {
             // Convert the integer back to a raw pointer inside the new thread
             let instance_ptr = instance_ptr_value as *mut plugin_ffi::UpsclrEngineInstance;
@@ -751,19 +796,19 @@ pub async fn upscale_image(
             let result = (upscale_task_plugin_arc.upsclr_plugin_upscale)(
                 instance_ptr,
                 upscale_scale_factor,
-                in_data_vec_for_task.as_ptr(), // Input image data
-                in_data_vec_for_task.len(),    // Size of input data
+                in_data_vec.as_ptr(),
+                in_data_vec.len(),
                 in_width,
                 in_height,
-                in_channels.into(),                 // Convert u8 to u32
-                in_color_format_plugin,             // Format of in_data_vec
-                out_data_vec_for_task.as_mut_ptr(), // Mutable buffer for output
-                out_size,                           // Size of output buffer
-                preferred_output_format.into(),     // Convert OutputFormat to UpsclrColorFormat
+                in_channels.into(),             // Convert u8 to u32
+                in_color_format_plugin,         // Format of in_data_vec
+                out_data_vec.as_mut_ptr(),      // Mutable buffer for output
+                out_size,                       // Size of output buffer
+                preferred_output_format.into(), // Convert OutputFormat to UpsclrColorFormat
             );
 
             // Return both the result code and the filled output buffer
-            (result, out_data_vec_for_task)
+            (result, out_data_vec)
         }
     })
     .await
@@ -789,12 +834,26 @@ pub async fn upscale_image(
 
     // --- Encode Output Image based on Accept Header ---
     // The `out_data_vec` now contains the raw pixel data from the plugin
-    // in `preferred_out_plugin_format`.
-    encode_output_image(
-        out_data_vec.as_slice(),
-        out_width,
-        out_height,
-        out_channels,
-        preferred_output_format,
-    )
+    // Process the output image in a separate blocking task to avoid holding both buffers in memory
+    let result = tokio::task::spawn_blocking(move || {
+        encode_output_image(
+            &out_data_vec,
+            out_width,
+            out_height,
+            out_channels,
+            preferred_output_format,
+        )
+    })
+    .await
+    .map_err(|e| {
+        AppError::InternalServerError(format!("Image encode task failed to execute: {}", e))
+    })?;
+
+    tracing::info!(
+        "Upscaling completed successfully for instance {} (req_id={})",
+        uuid,
+        request_id
+    );
+
+    result
 }

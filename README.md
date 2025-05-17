@@ -144,8 +144,12 @@ UPSCLR_SERVER_HOST=0.0.0.0 UPSCLR_SERVER_PORT=8080 UPSCLR_SERVER_PLUGINS_DIR=/pa
   - Request headers:
     - `Accept` (required): `image/png`, `image/jpeg`, or `image/x-raw-bitmap`
       - The `image/x-raw-bitmap` is our custom type for raw bitmap images with 16-byte header
-  - Request body (Multipart form-data):
-    - `file` (required): The image file to be upscaled. Currently supports `image/png`, `image/jpeg`, `image/webp`, and `image/x-raw-bitmap`.
+  - Request body (Two options):
+    - Option 1: Multipart form-data:
+      - `file` (required): The image file to be upscaled. Currently supports `image/png`, `image/jpeg`, `image/webp`, and `image/x-raw-bitmap`.
+    - Option 2: Direct image upload:
+      - Content-Type header should be set to the image type (e.g., `image/png`, `image/jpeg`, `image/webp`, or `image/x-raw-bitmap`)
+      - The request body should be the raw image data
   - Response body (image data):
     - The upscaled image in the requested format
 
