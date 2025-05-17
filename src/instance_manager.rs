@@ -46,6 +46,21 @@ impl Drop for ActiveInstance {
     }
 }
 
+/// An engine instance state for import/export.
+#[derive(Debug, Clone)]
+pub struct InstanceState {
+    pub instance_id: Uuid,
+    pub plugin_id: String,
+    pub engine_index_in_plugin: usize,
+    pub config_json_string: String,
+}
+
+/// Container for exporting all instances at once.
+#[derive(Debug, Clone)]
+pub struct InstanceManagerState {
+    pub instances: Vec<InstanceState>,
+}
+
 // Manages the collection of all active engine instances.
 // The InstanceManager itself (specifically, its `instances` HashMap)
 // should be protected by a Mutex if accessed concurrently by multiple Axum tasks.
@@ -147,9 +162,149 @@ impl InstanceManager {
         }
     }
 
-    pub fn cleanup(&mut self) {
-        // This will drop all instances, invoking their Drop implementation.
-        self.instances.clear();
-        tracing::info!("Cleared all engine instances.");
+    pub fn cleanup(&mut self, wait: bool) {
+        if wait {
+            tracing::debug!("Waiting for all engine instances to finish...");
+
+            // Create a weak reference to each instance to ensure they are dropped
+            let weak_refs: Vec<_> = self.instances.values().map(Arc::downgrade).collect();
+
+            // Clear the instances map, which will drop all instances
+            // This will not immediately drop them, but will allow them to be dropped when there are no more strong references.
+            self.instances.clear();
+
+            // Wait for all instances to be dropped
+            for weak_ref in weak_refs {
+                // This will block until the instance is dropped
+                while weak_ref.upgrade().is_some() {
+                    std::thread::yield_now(); // Yield to allow other threads to run
+                }
+            }
+
+            tracing::info!("All engine instances have been cleared.");
+        } else {
+            // This will drop all instances, invoking their Drop implementation.
+            self.instances.clear();
+
+            tracing::info!("Cleared all engine instances.");
+        }
+    }
+
+    // Export the current state of all instances.
+    pub fn export_state(&self) -> InstanceManagerState {
+        let instances = self
+            .instances
+            .values()
+            .map(|instance_arc| InstanceState {
+                instance_id: instance_arc.uuid,
+                plugin_id: instance_arc.plugin.plugin_info.id.clone(),
+                engine_index_in_plugin: instance_arc.engine_index_in_plugin,
+                config_json_string: instance_arc.config_json_string.clone(),
+            })
+            .collect();
+
+        InstanceManagerState { instances }
+    }
+
+    // Import instances from a previously exported state.
+    pub fn import_state(
+        &mut self,
+        state: InstanceManagerState,
+        plugin_manager: &crate::plugin_manager::PluginManager,
+    ) -> Result<Vec<Uuid>, AppError> {
+        // Clear existing instances before importing
+        if !self.instances.is_empty() {
+            tracing::warn!("Clearing existing instances before import.");
+            self.cleanup(true);
+        }
+
+        if state.instances.is_empty() {
+            tracing::info!("Importing empty instance state, nothing to do.");
+        }
+
+        let mut imported_ids = Vec::new();
+
+        for instance_state in state.instances {
+            // Skip instances that already exist (using the same UUID)
+            if self.instances.contains_key(&instance_state.instance_id) {
+                tracing::warn!(
+                    "Instance with ID {} already exists, skipping import.",
+                    instance_state.instance_id
+                );
+                continue;
+            }
+
+            // Find the plugin
+            let plugin = match plugin_manager.find_plugin_by_id(&instance_state.plugin_id) {
+                Some(p) => p,
+                None => {
+                    tracing::warn!(
+                        "Plugin with ID {} not found, skipping instance {}.",
+                        instance_state.plugin_id,
+                        instance_state.instance_id
+                    );
+                    continue;
+                }
+            };
+
+            // Validate engine index
+            if instance_state.engine_index_in_plugin >= plugin.engines_info.len() {
+                tracing::warn!(
+                    "Invalid engine index {} for plugin {}, skipping instance {}.",
+                    instance_state.engine_index_in_plugin,
+                    instance_state.plugin_id,
+                    instance_state.instance_id
+                );
+                continue;
+            }
+
+            // Create a CString for FFI
+            let config_json_c_str = match CString::new(&instance_state.config_json_string[..]) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to create CString for instance {}: {}",
+                        instance_state.instance_id,
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            // Call the plugin to create the instance
+            let instance_ptr = unsafe {
+                (plugin.upsclr_plugin_create_engine_instance)(
+                    instance_state.engine_index_in_plugin,
+                    config_json_c_str.as_ptr(),
+                    config_json_c_str.as_bytes().len(),
+                )
+            };
+
+            // Check if instance creation succeeded
+            if instance_ptr.is_null() {
+                tracing::warn!(
+                    "Failed to create instance {}, plugin returned null pointer.",
+                    instance_state.instance_id
+                );
+                continue;
+            }
+
+            // Create and store the ActiveInstance with the original UUID
+            let active_instance = Arc::new(ActiveInstance {
+                uuid: instance_state.instance_id,
+                instance_ptr,
+                plugin: plugin.clone(),
+                engine_index_in_plugin: instance_state.engine_index_in_plugin,
+                config_json_string: instance_state.config_json_string,
+            });
+
+            self.instances
+                .insert(instance_state.instance_id, active_instance);
+            imported_ids.push(instance_state.instance_id);
+
+            tracing::info!("Imported engine instance: {}", instance_state.instance_id);
+        }
+
+        Ok(imported_ids)
     }
 }

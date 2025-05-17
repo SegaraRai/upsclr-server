@@ -70,7 +70,7 @@ pub struct CreateInstanceQuery {
     pub dry_run: Option<bool>,
 }
 
-// Custom deserializer for dry_run query parameter (0, 1, or missing).
+// Custom deserializer for dry_run query parameter (0, 1, true, false, or missing).
 pub fn deserialize_bool_from_int_optional_query<'de, D>(
     deserializer: D,
 ) -> Result<Option<bool>, D::Error>

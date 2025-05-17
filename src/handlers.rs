@@ -3,11 +3,7 @@
 // Includes handlers that use the combined state tuple (SharedPluginManager, SharedInstanceManager).
 
 use crate::{
-    error::{AppError, lock_mutex_app_error},
-    headers,
-    instance_manager::InstanceManager,
-    models::*,
-    plugin_ffi,
+    error::AppError, headers, instance_manager::InstanceManager, models::*, plugin_ffi,
     plugin_manager::PluginManager,
 };
 use axum::{
@@ -18,16 +14,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::TypedHeader;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
 // --- Shared State Type Aliases (for convenience in handler signatures) ---
 #[allow(unused)]
-pub type SharedPluginManager = Arc<PluginManager>;
-// InstanceManager methods take `&mut self` for `create_instance` and `delete_instance`,
-// so it needs a Mutex when shared across Axum's concurrent tasks.
+pub type SharedPluginManager = Arc<RwLock<PluginManager>>;
 #[allow(unused)]
-pub type SharedInstanceManager = Arc<Mutex<InstanceManager>>;
+pub type SharedInstanceManager = Arc<RwLock<InstanceManager>>;
 
 pub const MAX_IMAGE_SIZE_BYTES: usize = 100 * 1024 * 1024; // Example: 100MB limit for input image.
 
@@ -414,10 +408,11 @@ async fn extract_direct_image(
 // --- GET /plugins ---
 // Lists all loaded plugins and their available engines.
 pub async fn get_plugins(
-    State(plugin_manager): State<SharedPluginManager>,
+    State((plugin_manager, _)): State<(SharedPluginManager, SharedInstanceManager)>,
 ) -> Result<Json<Vec<PluginDescriptionResponse>>, AppError> {
     let descriptions: Vec<PluginDescriptionResponse> = plugin_manager
-        .plugins
+        .read()?
+        .get_plugins()
         .iter()
         .map(|plugin_arc| PluginDescriptionResponse {
             plugin_info: plugin_arc.plugin_info.clone(),
@@ -431,10 +426,9 @@ pub async fn get_plugins(
 // --- GET /instances ---
 // Lists all currently active engine instances.
 pub async fn list_instances(
-    State((_, instance_manager_mutex)): State<(SharedPluginManager, SharedInstanceManager)>,
+    State((_, instance_manager)): State<(SharedPluginManager, SharedInstanceManager)>,
 ) -> Result<Json<Vec<InstanceInfoForList>>, AppError> {
-    let manager_locked = lock_mutex_app_error(&instance_manager_mutex, "list_instances")?;
-    let instances_info = manager_locked.list_instances_info();
+    let instances_info = instance_manager.read()?.list_instances_info();
     tracing::debug!(
         "Returning {} active instance descriptions.",
         instances_info.len()
@@ -446,10 +440,7 @@ pub async fn list_instances(
 // Creates a new engine instance or validates configuration (if dry_run=true).
 pub async fn create_instance_handler(
     // Combined state with both managers
-    State((plugin_manager, instance_manager_mutex)): State<(
-        SharedPluginManager,
-        SharedInstanceManager,
-    )>,
+    State((plugin_manager, instance_manager)): State<(SharedPluginManager, SharedInstanceManager)>,
     Query(query_params): Query<CreateInstanceQuery>, // Use CreateInstanceQuery from models
     Json(payload): Json<CreateInstanceRequest>,
 ) -> Result<Json<CreateInstanceResponse>, AppError> {
@@ -463,6 +454,7 @@ pub async fn create_instance_handler(
 
     // Find the specified plugin by its ID.
     let plugin_arc = plugin_manager
+        .read()?
         .find_plugin_by_id(&payload.plugin_id)
         .ok_or_else(|| AppError::PluginNotFound(payload.plugin_id.clone()))?;
 
@@ -568,10 +560,11 @@ pub async fn create_instance_handler(
     // it might be an error or an implicit pass. The current logic defaults it to Some(valid).
 
     // --- Instance Creation ---
-    // Lock the InstanceManager to modify its state.
-    let mut manager_locked = lock_mutex_app_error(&instance_manager_mutex, "create_instance")?;
-    let active_instance_arc =
-        manager_locked.create_instance(plugin_arc.clone(), engine_index, &config_json_str)?; // Pass Rust string
+    let active_instance_arc = instance_manager.write()?.create_instance(
+        plugin_arc.clone(),
+        engine_index,
+        &config_json_str,
+    )?;
 
     tracing::info!(
         "Successfully created instance: {}",
@@ -586,7 +579,7 @@ pub async fn create_instance_handler(
 // --- POST /instances/{uuid}/preload?scale=N ---
 // Preloads resources for a given engine instance and scale factor.
 pub async fn preload_instance(
-    State((_, instance_manager_mutex)): State<(SharedPluginManager, SharedInstanceManager)>,
+    State((_, instance_manager)): State<(SharedPluginManager, SharedInstanceManager)>,
     Path(uuid): Path<Uuid>,
     Query(params): Query<ScaleQueryParam>,
 ) -> Result<StatusCode, AppError> {
@@ -600,13 +593,10 @@ pub async fn preload_instance(
     tracing::info!("Preloading instance {} for scale {}", uuid, params.scale);
 
     // Retrieve the active instance. Arc is cloned to be moved into spawn_blocking.
-    let instance_arc = {
-        // Scope for MutexGuard
-        let manager_locked = lock_mutex_app_error(&instance_manager_mutex, "preload_get_instance")?;
-        manager_locked
-            .get_instance(&uuid)
-            .ok_or(AppError::InstanceNotFound)?
-    };
+    let instance_arc = instance_manager
+        .read()?
+        .get_instance(&uuid)
+        .ok_or(AppError::InstanceNotFound)?;
 
     // Convert the raw pointer into an integer value that can be safely sent between threads
     let instance_ptr_value = instance_arc.instance_ptr as usize;
@@ -655,20 +645,19 @@ pub async fn preload_instance(
 // --- DELETE /instances/{uuid} ---
 // Destroys an active engine instance.
 pub async fn delete_instance_handler(
-    State((_, instance_manager_mutex)): State<(SharedPluginManager, SharedInstanceManager)>,
+    State((_, instance_manager)): State<(SharedPluginManager, SharedInstanceManager)>,
     Path(uuid): Path<Uuid>, // Extract UUID from the URL path.
 ) -> Result<StatusCode, AppError> {
     tracing::debug!("Request to delete instance: {}", uuid);
-    let mut manager_locked = lock_mutex_app_error(&instance_manager_mutex, "delete_instance")?;
-    manager_locked.delete_instance(&uuid)?; // This now returns AppError::InstanceNotFound on failure.
+    instance_manager.write()?.delete_instance(&uuid)?;
     tracing::debug!("Successfully deleted instance: {}", uuid);
-    Ok(StatusCode::NO_CONTENT) // HTTP 204 No Content on successful deletion.
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- POST /instances/{uuid}/upscale?scale=N ---
 // Upscales an image using the specified engine instance.
 pub async fn upscale_image(
-    State((_, instance_manager_mutex)): State<(SharedPluginManager, SharedInstanceManager)>,
+    State((_, instance_manager)): State<(SharedPluginManager, SharedInstanceManager)>,
     Path(uuid): Path<Uuid>,
     Query(params): Query<ScaleQueryParam>,
     TypedHeader(accept_header): TypedHeader<headers::Accept>,
@@ -709,13 +698,10 @@ pub async fn upscale_image(
 
     // --- Get Instance ---
     // Clone Arc<ActiveInstance> to be moved into the blocking task.
-    let instance_arc = {
-        // Scope for MutexGuard
-        let manager_locked = lock_mutex_app_error(&instance_manager_mutex, "upscale_get_instance")?;
-        manager_locked
-            .get_instance(&uuid)
-            .ok_or(AppError::InstanceNotFound)?
-    };
+    let instance_arc = instance_manager
+        .read()?
+        .get_instance(&uuid)
+        .ok_or(AppError::InstanceNotFound)?;
 
     // --- Decode Input Image (handles standard formats and custom x-raw-bitmap) ---
     tracing::debug!("Decoding input image...");
@@ -856,4 +842,58 @@ pub async fn upscale_image(
     );
 
     result
+}
+
+// --- POST /reset ---
+// Query parameters for the reset endpoint
+#[derive(serde::Deserialize)]
+pub struct ResetQuery {
+    // Whether to reset plugins in addition to instances (0/false = no, 1/true = yes)
+    #[serde(default, deserialize_with = "deserialize_bool_from_int_optional_query")]
+    pub plugins: Option<bool>,
+}
+
+// Resets the instances and optionally plugins.
+pub async fn reset(
+    State((plugin_manager, instance_manager)): State<(SharedPluginManager, SharedInstanceManager)>,
+    Query(query_params): Query<ResetQuery>,
+) -> Result<StatusCode, AppError> {
+    let reset_plugins = query_params.plugins.unwrap_or(false); // Default to false if not provided
+
+    tracing::info!("Received reset request. (plugins={})", reset_plugins);
+
+    let mut plugin_manager = plugin_manager.write()?;
+    let mut instance_manager = instance_manager.write()?;
+
+    // First, clear instance manager
+    tracing::debug!("Resetting all active engine instances.");
+    let instances_state = instance_manager.export_state();
+    instance_manager.cleanup(true);
+    tracing::debug!("All active engine instances have been reset.");
+
+    // Next, reset plugins if requested
+    if reset_plugins {
+        tracing::debug!("Resetting all loaded plugins.");
+        let plugins_state = plugin_manager.export_state();
+        plugin_manager.cleanup(true);
+        tracing::debug!("All plugins have been reset.");
+
+        tracing::debug!("Restoring plugins from saved state.");
+        unsafe { plugin_manager.import_state(plugins_state) }?;
+        tracing::debug!("Plugins have been restored from state.");
+    } else {
+        tracing::debug!("Skipping plugin reset as per request.");
+    }
+
+    // Restore instances from the saved state
+    tracing::debug!("Restoring engine instances from saved state.");
+    instance_manager.import_state(instances_state, &plugin_manager)?;
+    tracing::debug!("Engine instances have been restored from state.");
+
+    tracing::info!(
+        "Reset operation completed successfully. (plugins={})",
+        reset_plugins
+    );
+
+    Ok(StatusCode::NO_CONTENT)
 }

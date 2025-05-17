@@ -19,8 +19,10 @@ use clap::Parser;
 use instance_manager::InstanceManager;
 use plugin_manager::PluginManager;
 use socket2::{Domain, Protocol, Socket, Type};
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, RwLock},
+};
 use tokio::signal;
 use tower_http::{
     cors::CorsLayer,                      // For Cross-Origin Resource Sharing
@@ -69,42 +71,59 @@ async fn main() {
     // --- Initialize PluginManager ---
     // This operation is `unsafe` because it involves loading dynamic libraries (FFI).
     // It should be one of the first things done, as plugins are core to functionality.
-    let plugin_manager_arc = match unsafe { PluginManager::new(plugins_directory) } {
-        Ok(pm) => Arc::new(pm),
-        Err(e) => {
+    let plugin_manager = unsafe {
+        PluginManager::new(plugins_directory)
+    }.unwrap_or_else(|err| {
             // If plugin loading fails critically, the server might be useless.
             tracing::error!(
                 "FATAL: Failed to initialize PluginManager: {:?}. Server cannot operate without plugins.",
-                e
+                err
             );
             eprintln!("FATAL: Plugin initialization failed. See logs for details. Exiting.");
             std::process::exit(1); // Exit if no plugins can be loaded.
         }
-    };
+    );
     tracing::info!(
         "PluginManager initialized. Loaded {} plugin(s).",
-        plugin_manager_arc.plugins.len()
+        plugin_manager.count_plugins()
     );
-    if plugin_manager_arc.plugins.is_empty() {
+    if plugin_manager.is_empty() {
         tracing::warn!(
             "No plugins were loaded. The server will run but may have no upscaling capabilities."
         );
     }
 
+    let plugin_manager_arc = Arc::new(RwLock::new(plugin_manager));
+
     // --- Initialize InstanceManager ---
-    // Wrapped in Arc<Mutex> for shared, mutable access across concurrent Axum tasks.
-    let instance_manager_arc = Arc::new(Mutex::new(InstanceManager::default()));
+    let instance_manager_arc = Arc::new(RwLock::new(InstanceManager::default()));
     tracing::info!("InstanceManager initialized.");
 
     // --- Build Axum Application Router ---
     // Define routes and associate them with their respective handler functions.
     // Also, apply middleware layers.
 
-    // Create separate routers for different state types
-    // Router for handlers that need only PluginManager
-    let app_router = Router::new()
+    // Create a router with combined state for handlers needing both managers
+    let app = Router::new()
         // Plugin and Engine discovery (only needs PluginManager)
         .route("/plugins", get(handlers::get_plugins))
+        // Instance management endpoints
+        .route(
+            "/instances",
+            get(handlers::list_instances).post(handlers::create_instance_handler),
+        )
+        .route(
+            "/instances/{uuid}",
+            delete(handlers::delete_instance_handler),
+        )
+        // Instance operations
+        .route(
+            "/instances/{uuid}/preload",
+            post(handlers::preload_instance),
+        )
+        .route("/instances/{uuid}/upscale", post(handlers::upscale_image))
+        // Reset endpoint
+        .route("/reset", post(handlers::reset))
         // Apply a layer to limit the maximum size of request bodies (e.g., for image uploads).
         .layer(DefaultBodyLimit::max(handlers::MAX_IMAGE_SIZE_BYTES))
         // Add CORS layer for broader client compatibility (e.g., web frontends from different origins).
@@ -115,25 +134,7 @@ async fn main() {
             TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::new().level(Level::INFO)), // Log at INFO level
         )
         // Provide the shared state
-        .with_state(plugin_manager_arc.clone());
-
-    // Create a router with combined state for handlers needing both managers
-    // We need to use the tuple state for handlers needing both managers
-    let combined_state = (plugin_manager_arc.clone(), instance_manager_arc.clone());
-    let instances_router = Router::new()
-        // Instance management endpoints
-        .route(
-            "/",
-            get(handlers::list_instances).post(handlers::create_instance_handler),
-        )
-        .route("/{uuid}", delete(handlers::delete_instance_handler))
-        // Instance operations
-        .route("/{uuid}/preload", post(handlers::preload_instance))
-        .route("/{uuid}/upscale", post(handlers::upscale_image))
-        .with_state(combined_state);
-
-    // Merge the routers
-    let app = app_router.nest("/instances", instances_router);
+        .with_state((plugin_manager_arc.clone(), instance_manager_arc.clone()));
 
     tracing::info!("Axum router configured.");
 
@@ -161,7 +162,8 @@ async fn main() {
 
     tracing::info!("upsclr-server has shut down.");
 
-    instance_manager_arc.lock().unwrap().cleanup();
+    instance_manager_arc.write().unwrap().cleanup(true);
+    plugin_manager_arc.write().unwrap().cleanup(true);
 }
 
 async fn create_listener(

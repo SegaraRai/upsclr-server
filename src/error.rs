@@ -148,15 +148,8 @@ impl From<image::ImageError> for AppError {
     }
 }
 
-// Helper for locking mutexes, converting PoisonError to AppError
-pub fn lock_mutex_app_error<'a, T>(
-    mutex: &'a std::sync::Mutex<T>,
-    operation_name: &'static str,
-) -> Result<std::sync::MutexGuard<'a, T>, AppError> {
-    mutex.lock().map_err(|e| {
-        AppError::InternalServerError(format!(
-            "Failed to acquire lock for {}: {}",
-            operation_name, e
-        ))
-    })
+impl<T> From<std::sync::PoisonError<T>> for AppError {
+    fn from(err: std::sync::PoisonError<T>) -> Self {
+        AppError::InternalServerError(format!("Mutex lock poisoned: {}", err))
+    }
 }

@@ -86,6 +86,19 @@ pub struct LoadedPlugin {
 // unsafe impl Send for LoadedPlugin {}
 // unsafe impl Sync for LoadedPlugin {}
 
+/// Represents a plugin state for import/export.
+#[derive(Clone, Debug)]
+pub struct PluginState {
+    id: String,
+    path: PathBuf,
+}
+
+/// Container for exporting all plugins at once.
+#[derive(Clone, Debug)]
+pub struct PluginManagerState {
+    plugins: Vec<PluginState>,
+}
+
 // Rust-native representation of basic plugin information.
 #[derive(Serialize, Clone, Debug)]
 pub struct PluginInfo {
@@ -109,7 +122,7 @@ pub struct EngineInfo {
 // Manages a collection of all plugins loaded by the server.
 pub struct PluginManager {
     // A list of all successfully loaded plugins.
-    pub plugins: Vec<Arc<LoadedPlugin>>,
+    plugins: Vec<Arc<LoadedPlugin>>,
     // For quick lookup of a plugin by its ID (e.g., filename).
     plugins_by_id: HashMap<String, Arc<LoadedPlugin>>,
 }
@@ -404,5 +417,125 @@ impl PluginManager {
     // Finds a loaded plugin by its unique ID (typically its filename).
     pub fn find_plugin_by_id(&self, id: &str) -> Option<Arc<LoadedPlugin>> {
         self.plugins_by_id.get(id).cloned()
+    }
+
+    pub fn count_plugins(&self) -> usize {
+        self.plugins.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.plugins.is_empty()
+    }
+
+    pub fn get_plugins(&self) -> &[Arc<LoadedPlugin>] {
+        &self.plugins
+    }
+
+    pub fn cleanup(&mut self, wait: bool) {
+        if wait {
+            tracing::debug!("Waiting for all plugins to finish...");
+
+            // Create a weak reference to each plugin to ensure they are dropped
+            let weak_refs: Vec<_> = self.plugins.iter().map(Arc::downgrade).collect();
+
+            // Clear the plugins map, which will drop all plugins
+            self.plugins.clear();
+            self.plugins_by_id.clear();
+
+            // Wait for all plugins to be dropped
+            for weak_ref in weak_refs {
+                // This will block until the plugin is dropped
+                while weak_ref.upgrade().is_some() {
+                    std::thread::yield_now(); // Yield to allow other threads to run
+                }
+            }
+
+            tracing::info!("All plugins have been cleared.");
+        } else {
+            self.plugins.clear();
+            self.plugins_by_id.clear();
+
+            tracing::info!("Cleared all plugins.");
+        }
+    }
+
+    // Export the current state of all loaded plugins.
+    pub fn export_state(&self) -> PluginManagerState {
+        let plugins = self
+            .plugins
+            .iter()
+            .map(|plugin_arc| PluginState {
+                id: plugin_arc.id.clone(),
+                path: plugin_arc.path.clone(),
+            })
+            .collect();
+
+        PluginManagerState { plugins }
+    }
+
+    // Import plugins from a previously exported state.
+    // This function is marked as unsafe because it calls load_plugin_from_path which is unsafe
+    pub unsafe fn import_state(
+        &mut self,
+        state: PluginManagerState,
+    ) -> Result<Vec<String>, AppError> {
+        // Clear existing plugins before importing
+        if !self.plugins.is_empty() {
+            tracing::warn!("Clearing existing plugins before import.");
+            self.cleanup(true);
+        }
+
+        if state.plugins.is_empty() {
+            tracing::info!("Importing empty plugin state, nothing to do.");
+        }
+
+        let mut imported_ids = Vec::new();
+
+        for plugin_state in state.plugins {
+            // Skip plugins that are already loaded (using the same ID)
+            if self.plugins_by_id.contains_key(&plugin_state.id) {
+                tracing::warn!(
+                    "Plugin with ID {} already loaded, skipping import.",
+                    plugin_state.id
+                );
+                continue;
+            }
+
+            // Check if the path exists
+            if !plugin_state.path.exists() {
+                tracing::warn!(
+                    "Plugin path {:?} does not exist, skipping import for plugin ID {}.",
+                    plugin_state.path,
+                    plugin_state.id
+                );
+                continue;
+            }
+
+            // Load the plugin
+            match Self::load_plugin_from_path(&plugin_state.path) {
+                Ok(loaded_plugin_arc) => {
+                    tracing::info!(
+                        "Successfully imported plugin '{}' (ID: {}) from {:?}",
+                        loaded_plugin_arc.plugin_info.name,
+                        loaded_plugin_arc.id,
+                        plugin_state.path
+                    );
+                    self.plugins_by_id
+                        .insert(loaded_plugin_arc.id.clone(), loaded_plugin_arc.clone());
+                    self.plugins.push(loaded_plugin_arc);
+                    imported_ids.push(plugin_state.id);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to import plugin from {:?}: {}",
+                        plugin_state.path,
+                        e
+                    );
+                    continue;
+                }
+            }
+        }
+
+        Ok(imported_ids)
     }
 }

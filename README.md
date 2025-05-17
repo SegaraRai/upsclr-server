@@ -152,6 +152,11 @@ UPSCLR_SERVER_HOST=0.0.0.0 UPSCLR_SERVER_PORT=8080 UPSCLR_SERVER_PLUGINS_DIR=/pa
       - The request body should be the raw image data
   - Response body (image data):
     - The upscaled image in the requested format
+- `POST /reset` - Recreate all upscaling engine instances and optionally reload plugins
+  - Query parameters:
+    - `plugins` (optional): Set to `1` or `true` to reload plugins
+  - No request body
+  - No response body
 
 ## License
 
