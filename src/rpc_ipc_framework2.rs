@@ -3,7 +3,6 @@ use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::marker::PhantomData;
-use std::sync::Arc;
 use tarpc::{
     ClientMessage, Response, Transport,
     client::{Config as ClientConfig, NewClient, RpcError},
@@ -50,8 +49,6 @@ where
 
 /// Configuration for the RPC client (used by the main process)
 pub struct RpcClientConfig {
-    /// Timeout for client calls
-    pub timeout_ms: u64,
     /// Timeout for graceful shutdown
     pub shutdown_timeout_ms: u64,
 }
@@ -59,7 +56,6 @@ pub struct RpcClientConfig {
 impl Default for RpcClientConfig {
     fn default() -> Self {
         Self {
-            timeout_ms: 5000,
             shutdown_timeout_ms: 5000,
         }
     }
