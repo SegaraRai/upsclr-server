@@ -1,277 +1,139 @@
-// Main entry point for the upsclr-server application.
-// Sets up the Tokio runtime, initializes services (PluginManager, InstanceManager),
-// configures the Axum router, and starts the HTTP server.
+mod rpc_ipc_framework2;
 
-mod error;
-mod handlers;
-mod headers;
-mod instance_manager;
-mod models;
-mod plugin_ffi;
-mod plugin_manager;
-
-use axum::{
-    Router,
-    extract::DefaultBodyLimit,
-    routing::{delete, get, post},
+use futures::StreamExt;
+use rpc_ipc_framework2::{
+    BootstrapConfirmation, MainProcessBootstrap, MainProcessClientFactory, RpcClientConfig,
+    RpcHostBootstrapClient, RpcHostServerFactory, RpcServerConfig,
 };
-use clap::Parser;
-use instance_manager::InstanceManager;
-use plugin_manager::PluginManager;
-use socket2::{Domain, Protocol, Socket, Type};
-use std::{net::SocketAddr, sync::Arc};
-use tokio::{signal, sync::RwLock};
-use tower_http::{
-    cors::CorsLayer,                      // For Cross-Origin Resource Sharing
-    trace::{DefaultMakeSpan, TraceLayer}, // For detailed request logging
-};
-use tracing::Level;
-
-/// Command line arguments for upsclr-server
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct AppConfig {
-    /// Hostname/IP to bind the server to.
-    /// If this option is specified without value, it will default to "*", meaning the server will listen on all interfaces.
-    #[arg(long, env = "UPSCLR_SERVER_HOST", default_value = "localhost", num_args = 0..=1, default_missing_value = "*")]
-    host: String,
-
-    /// Port number to listen on.
-    #[arg(short, long, env = "UPSCLR_SERVER_PORT", default_value_t = 6795)]
-    port: u16,
-
-    /// Directory containing plugin shared libraries.
-    #[arg(long, env = "UPSCLR_SERVER_PLUGINS_DIR", default_value = "plugins")]
-    plugins_dir: String,
-}
+use tarpc::{context, server::Channel};
+use tracing::{Level, info};
 
 #[tokio::main]
-async fn main() {
-    // Parse command line args and environment variables
-    let config = AppConfig::parse();
-
-    // Initialize tracing subscriber for structured logging.
-    // Logs will go to stdout. Adjust level and format as needed.
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_max_level(Level::INFO) // Set to DEBUG for more verbose FFI/plugin load logs
-        .with_target(true) // Include module path in logs
-        .with_file(true) // Include source file name
-        .with_line_number(true) // Include line numbers
+        .with_max_level(Level::DEBUG)
+        .with_target(true)
+        .with_file(true)
+        .with_line_number(true)
         .init();
 
-    tracing::info!("Starting upsclr-server...");
+    // Check if we are running in plugin host mode
+    let args: Vec<String> = std::env::args().collect();
+    if args.contains(&"--mode=plugin".to_string()) {
+        let ipc_name = args
+            .iter()
+            .find(|&arg| arg.starts_with("--ipc="))
+            .and_then(|arg| arg.split('=').nth(1))
+            .expect("IPC name must be provided in plugin host mode");
 
-    // Configuration: Path to the directory containing plugin shared libraries.
-    let plugins_directory = &config.plugins_dir;
-    tracing::info!("Plugin directory set to: {}", plugins_directory);
-
-    // --- Initialize PluginManager ---
-    // This operation is `unsafe` because it involves loading dynamic libraries (FFI).
-    // It should be one of the first things done, as plugins are core to functionality.
-    let plugin_manager = unsafe {
-        PluginManager::new(plugins_directory)
-    }.unwrap_or_else(|err| {
-            // If plugin loading fails critically, the server might be useless.
-            tracing::error!(
-                "FATAL: Failed to initialize PluginManager: {:?}. Server cannot operate without plugins.",
-                err
-            );
-            eprintln!("FATAL: Plugin initialization failed. See logs for details. Exiting.");
-            std::process::exit(1); // Exit if no plugins can be loaded.
-        }
-    );
-    tracing::info!(
-        "PluginManager initialized. Loaded {} plugin(s).",
-        plugin_manager.count_plugins()
-    );
-    if plugin_manager.is_empty() {
-        tracing::warn!(
-            "No plugins were loaded. The server will run but may have no upscaling capabilities."
-        );
+        return example_rpc_host(ipc_name).await;
     }
 
-    let plugin_manager_arc = Arc::new(RwLock::new(plugin_manager));
-
-    // --- Initialize InstanceManager ---
-    let instance_manager_arc = Arc::new(RwLock::new(InstanceManager::default()));
-    tracing::info!("InstanceManager initialized.");
-
-    // --- Build Axum Application Router ---
-    // Define routes and associate them with their respective handler functions.
-    // Also, apply middleware layers.
-
-    // Create a router with combined state for handlers needing both managers
-    let app = Router::new()
-        // Plugin and Engine discovery (only needs PluginManager)
-        .route("/plugins", get(handlers::get_plugins))
-        // Instance management endpoints
-        .route(
-            "/instances",
-            get(handlers::list_instances).post(handlers::create_instance_handler),
-        )
-        .route(
-            "/instances/{uuid}",
-            delete(handlers::delete_instance_handler),
-        )
-        // Instance operations
-        .route(
-            "/instances/{uuid}/preload",
-            post(handlers::preload_instance),
-        )
-        .route("/instances/{uuid}/upscale", post(handlers::upscale_image))
-        // Reset endpoint
-        .route("/reset", post(handlers::reset))
-        // Apply a layer to limit the maximum size of request bodies (e.g., for image uploads).
-        .layer(DefaultBodyLimit::max(handlers::MAX_IMAGE_SIZE_BYTES))
-        // Add CORS layer for broader client compatibility (e.g., web frontends from different origins).
-        // Configure this layer according to your security requirements.
-        .layer(CorsLayer::permissive()) // Example: allows all origins. Restrict in production.
-        // Add a TraceLayer for logging HTTP request and response details.
-        .layer(
-            TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::new().level(Level::INFO)), // Log at INFO level
-        )
-        // Provide the shared state
-        .with_state((plugin_manager_arc.clone(), instance_manager_arc.clone()));
-
-    tracing::info!("Axum router configured.");
-
-    // --- Start HTTP Server ---
-    let listener = match create_listener(&config.host, config.port).await {
-        Ok((addr, l)) => {
-            tracing::info!("Server successfully bound. Listening on {}", addr);
-            l
-        }
-        Err(e) => {
-            tracing::error!("FATAL: Failed to bind server: {}", e);
-            eprintln!("FATAL: Could not bind server. Error: {}. Exiting.", e);
-            std::process::exit(1);
-        }
-    };
-
-    // Run the server.
-    if let Err(e) = axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-    {
-        tracing::error!("Server run error: {}", e);
-        eprintln!("ERROR: Server shut down unexpectedly. Error: {}", e);
-    }
-
-    tracing::info!("upsclr-server has shut down.");
-
-    let mut plugin_manager = plugin_manager_arc.write().await;
-    let mut instance_manager = instance_manager_arc.write().await;
-
-    instance_manager.cleanup(true);
-    plugin_manager.cleanup(true);
+    // Run the main process example
+    example_main_process().await
 }
 
-async fn create_listener(
-    host: &str,
-    port: u16,
-) -> std::io::Result<(String, tokio::net::TcpListener)> {
-    if host == "*" {
-        fn create_ipv6_dual_stack_wildcard_listener(
-            port: u16,
-        ) -> std::io::Result<(String, tokio::net::TcpListener)> {
-            let str_addr = format!("[::]:{}", port);
-            let addr: SocketAddr = str_addr.parse().unwrap();
-
-            tracing::info!(
-                "Attempting to bind server to {}... (IPv6 + IPv4 dual-stack)",
-                str_addr
-            );
-
-            // Try to create an IPv6 socket (this will fail if IPv6 is not supported)
-            let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
-
-            // Try to make it dual-stack (this might fail on some systems)
-            if let Err(e) = socket.set_only_v6(false) {
-                tracing::warn!(
-                    "Warning: Failed to set dual-stack mode for IPv6 socket: {}. Continuing anyway.",
-                    e
-                );
-                // Continue anyway, as some systems might still work
-            }
-
-            socket.set_reuse_address(true)?;
-            socket.bind(&addr.into())?;
-            socket.listen(1024)?;
-
-            // Make it non-blocking for tokio
-            socket.set_nonblocking(true)?;
-
-            // Convert to tokio listener
-            let std_listener: std::net::TcpListener = socket.into();
-            let tokio_listener = tokio::net::TcpListener::from_std(std_listener)?;
-
-            Ok((str_addr, tokio_listener))
-        }
-
-        fn create_wildcard_listener(
-            port: u16,
-        ) -> std::io::Result<(String, tokio::net::TcpListener)> {
-            // Try to create an IPv6 socket first
-            // This will work on systems that support IPv6, and if it also supports dual-stack, it will bind to both IPv4 and IPv6.
-            let ipv6_listener = create_ipv6_dual_stack_wildcard_listener(port);
-            if ipv6_listener.is_ok() {
-                return ipv6_listener;
-            }
-
-            tracing::warn!("Warning: Failed to bind IPv6 listener. Attempting IPv4 only.");
-
-            let str_addr = format!("0.0.0.0:{}", port);
-            let addr: SocketAddr = str_addr.parse().unwrap();
-
-            tracing::info!("Attempting to bind server to {}... (IPv4)", str_addr);
-
-            // Try to create an IPv4 socket
-            let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-
-            socket.set_reuse_address(true)?;
-            socket.bind(&addr.into())?;
-            socket.listen(1024)?;
-
-            // Make it non-blocking for tokio
-            socket.set_nonblocking(true)?;
-
-            let std_listener: std::net::TcpListener = socket.into();
-            let tokio_listener = tokio::net::TcpListener::from_std(std_listener)?;
-
-            Ok((str_addr, tokio_listener))
-        }
-
-        return create_wildcard_listener(port);
-    }
-
-    let addr = format!("{}:{}", host, port);
-    tracing::info!("Attempting to bind server to {}...", addr);
-
-    let tokio_listener = tokio::net::TcpListener::bind(&addr).await?;
-
-    Ok((addr, tokio_listener))
+#[tarpc::service]
+pub trait PidService {
+    async fn get_pid() -> u32;
 }
 
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
+// Server implementation
+#[derive(Clone)]
+pub struct PidServer;
 
-    #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
-    };
+impl PidService for PidServer {
+    async fn get_pid(self, _ctx: context::Context) -> u32 {
+        std::process::id()
+    }
+}
 
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
+// Main Process Example
+async fn example_main_process() -> Result<(), Box<dyn std::error::Error>> {
+    // Create bootstrap server and wait for RPC host to connect
+    let (bootstrap, request_tx, response_rx) =
+        MainProcessBootstrap::<PidServiceRequest, PidServiceResponse>::new().await?;
+
+    println!(
+        "Tell RPC host to connect to bootstrap: {}",
+        bootstrap.bootstrap_name()
+    );
+
+    // Create a client that talks to the RPC host with bridge
+    let (client, bridge_task) = MainProcessClientFactory::create_client(
+        request_tx,
+        response_rx,
+        RpcClientConfig::default(),
+        PidServiceClient::new,
+    )?;
+
+    // Make RPC calls to the RPC host
+    let pid = client.inner_client().get_pid(context::current()).await?;
+    println!("RPC host PID: {}", pid);
+
+    // Graceful shutdown
+    client.shutdown().await;
+    bootstrap.shutdown().await;
+    bridge_task.await?;
+
+    Ok(())
+}
+
+// RPC Host Example
+async fn example_rpc_host(bootstrap_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Connect to the main process
+    let (request_rx, response_tx, bootstrap_context) =
+        RpcHostBootstrapClient::connect::<PidServiceRequest, PidServiceResponse>(bootstrap_name)
+            .await?;
+
+    // Create a server to handle requests from the main process
+    let (server, bridge_task) = RpcHostServerFactory::create_server(
+        PidServer,
+        |server, channel| {
+            channel
+                .execute(server.serve())
+                .for_each(|response| async move {
+                    tokio::spawn(response);
+                })
+        },
+        request_rx,
+        response_tx,
+        RpcServerConfig::default(),
+    )
+    .await?;
+
+    // Set up a task to monitor bootstrap confirmation messages
+    let bootstrap_monitor = tokio::spawn(async move {
+        let mut confirmation_rx = bootstrap_context.confirmation_rx.to_stream();
+        while let Some(Ok(confirmation)) = confirmation_rx.next().await {
+            match confirmation {
+                BootstrapConfirmation::Ready => {
+                    info!("RPC host: Received ready confirmation from main process");
+                }
+                BootstrapConfirmation::Shutdown => {
+                    info!("RPC host: Received shutdown request from main process");
+                    break;
+                }
+            }
+        }
+        info!("RPC host: Bootstrap confirmation channel closed");
+    });
+
+    // Wait for some signal to shutdown
+    let ctrl_c = tokio::signal::ctrl_c();
 
     tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+        _ = bootstrap_monitor => {
+            info!("RPC host: Bootstrap monitor completed");
+        }
+        _ = ctrl_c => {
+            info!("RPC host: Ctrl-C received, shutting down");
+        }
     }
+
+    // Graceful shutdown
+    server.shutdown().await;
+    bridge_task.await?;
+
+    Ok(())
 }
