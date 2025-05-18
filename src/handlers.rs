@@ -14,7 +14,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::TypedHeader;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 // --- Shared State Type Aliases (for convenience in handler signatures) ---
@@ -28,15 +29,11 @@ pub const MAX_IMAGE_SIZE_BYTES: usize = 100 * 1024 * 1024; // Example: 100MB lim
 // OutputFormat enum for handling different image output formats
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum OutputFormat {
-    Png {
-        compression: u8,
-    },
-    Jpeg {
-        quality: u8,
-    },
-    Raw {
-        color_format: plugin_ffi::UpsclrColorFormat,
-    },
+    Png { compression: u8 },
+    Jpeg { quality: u8 },
+    Bmp,
+    Tga,
+    Qoi,
 }
 
 impl TryFrom<&mime::Mime> for OutputFormat {
@@ -59,20 +56,9 @@ impl TryFrom<&mime::Mime> for OutputFormat {
                         .unwrap_or(85);
                     Ok(OutputFormat::Jpeg { quality })
                 }
-                "x-raw-bitmap" => {
-                    let color_format = value.get_param("format").map_or(
-                        plugin_ffi::UpsclrColorFormat::Rgb,
-                        |cf| {
-                            let lower_str = cf.as_str().to_ascii_lowercase();
-                            if lower_str == "bgr" || lower_str == "bgra" {
-                                plugin_ffi::UpsclrColorFormat::Bgr
-                            } else {
-                                plugin_ffi::UpsclrColorFormat::Rgb
-                            }
-                        },
-                    );
-                    Ok(OutputFormat::Raw { color_format })
-                }
+                "bmp" | "x-bmp" => Ok(OutputFormat::Bmp),
+                "x-tga" | "x-targa" => Ok(OutputFormat::Tga),
+                "x-qoi" => Ok(OutputFormat::Qoi),
                 _ => Err(()),
             }
         } else {
@@ -82,12 +68,8 @@ impl TryFrom<&mime::Mime> for OutputFormat {
 }
 
 impl From<OutputFormat> for plugin_ffi::UpsclrColorFormat {
-    fn from(value: OutputFormat) -> Self {
-        match value {
-            OutputFormat::Png { .. } => plugin_ffi::UpsclrColorFormat::Rgb,
-            OutputFormat::Jpeg { .. } => plugin_ffi::UpsclrColorFormat::Rgb,
-            OutputFormat::Raw { color_format } => color_format,
-        }
+    fn from(_value: OutputFormat) -> Self {
+        plugin_ffi::UpsclrColorFormat::Rgb
     }
 }
 
@@ -96,20 +78,25 @@ fn decode_input_image(
     file_data: &[u8],
     content_type_str: Option<&str>,
 ) -> Result<(Vec<u8>, u32, u32, u8, plugin_ffi::UpsclrColorFormat), AppError> {
-    use byteorder::{ByteOrder, LittleEndian};
-
     let media_type = content_type_str.map(|s| s[0..s.find(';').unwrap_or(s.len())].trim());
 
-    match media_type {
-        Some("image/jpeg") | Some("image/png") | Some("image/webp") | None => {
-            // Determine image format from content type string.
-            let img_format_hint = match media_type {
-                Some("image/jpeg") => Some(image::ImageFormat::Jpeg),
-                Some("image/png") => Some(image::ImageFormat::Png),
-                Some("image/webp") => Some(image::ImageFormat::WebP),
-                _ => None,
-            };
+    let img_format_hint = match media_type {
+        Some("image/jpeg") => Some(image::ImageFormat::Jpeg),
+        Some("image/png") => Some(image::ImageFormat::Png),
+        Some("image/webp") => Some(image::ImageFormat::WebP),
+        Some("image/qoi") => Some(image::ImageFormat::Qoi),
+        Some("image/x-qoi") => Some(image::ImageFormat::Qoi),
+        Some("image/bmp") => Some(image::ImageFormat::Bmp),
+        Some("image/x-bmp") => Some(image::ImageFormat::Bmp),
+        Some("image/vnd.ms-dds") => Some(image::ImageFormat::Dds),
+        Some("image/x-tga") => Some(image::ImageFormat::Tga),
+        Some("image/x-targa") => Some(image::ImageFormat::Tga),
+        _ => None,
+    };
 
+    match (media_type, img_format_hint) {
+        // If an image format is detected from Content-Type or Content-Type is not provided
+        (_, Some(_)) | (None, _) => {
             let dyn_img = if let Some(format) = img_format_hint {
                 image::load_from_memory_with_format(file_data, format).map_err(|e| {
                     AppError::ImageProcessingError(format!(
@@ -135,6 +122,7 @@ fn decode_input_image(
             } else {
                 dyn_img.to_rgba8().into_raw()
             };
+
             Ok((
                 data_vec,
                 width,
@@ -143,86 +131,9 @@ fn decode_input_image(
                 plugin_ffi::UpsclrColorFormat::Rgb,
             ))
         }
-        Some("image/x-raw-bitmap") => {
-            // Parse the 16-byte header for custom "image/x-raw-bitmap" format.
-            // Header: ["R"]["B"](2B), ColorFormat(1B), Channels(1B), DataSize(4B LE), Width(4B LE), Height(4B LE)
-            if file_data.len() < 16 {
-                return Err(AppError::ImageProcessingError(
-                    "x-raw-bitmap data is too short for its 16-byte header.".to_string(),
-                ));
-            }
-
-            if &file_data[0..2] != b"RB" {
-                // Magic bytes check.
-                return Err(AppError::ImageProcessingError(
-                    "Invalid magic bytes for x-raw-bitmap. Expected 'RB'.".to_string(),
-                ));
-            }
-
-            let header_color_format_byte = file_data[2]; // 0x01 for RGB/RGBA, 0x02 for BGR/BGRA
-            let header_channels_byte = file_data[3]; // 3 for RGB/BGR, 4 for RGBA/BGRA
-            let data_size_from_header = LittleEndian::read_u32(&file_data[4..8]); // Size of pixel data *after* header
-            let width = LittleEndian::read_u32(&file_data[8..12]);
-            let height = LittleEndian::read_u32(&file_data[12..16]);
-
-            if width == 0 || height == 0 {
-                return Err(AppError::ImageProcessingError(
-                    "x-raw-bitmap header indicates zero width or height.".to_string(),
-                ));
-            }
-            if header_channels_byte != 3 && header_channels_byte != 4 {
-                return Err(AppError::ImageProcessingError(format!(
-                    "x-raw-bitmap header specifies an unsupported channel count: {}. Expected 3 or 4.",
-                    header_channels_byte
-                )));
-            }
-
-            // Map header's ColorFormat byte to the plugin's plugin_ffi::UpsclrColorFormat enum.
-            let plugin_color_format = match header_color_format_byte {
-                0x01 => plugin_ffi::UpsclrColorFormat::Rgb, // Covers RGB and RGBA (plugin gets channels separately)
-                0x02 => plugin_ffi::UpsclrColorFormat::Bgr, // Covers BGR and BGRA
-                invalid_byte => {
-                    return Err(AppError::ImageProcessingError(format!(
-                        "Invalid ColorFormat byte (0x{:02X}) in x-raw-bitmap header. Expected 0x01 or 0x02.",
-                        invalid_byte
-                    )));
-                }
-            };
-
-            // Validate DataSize from header against calculated size and actual payload size.
-            let calculated_pixel_data_size = (width as usize)
-                .saturating_mul(height as usize)
-                .saturating_mul(header_channels_byte as usize);
-
-            if data_size_from_header as usize != calculated_pixel_data_size {
-                return Err(AppError::ImageProcessingError(format!(
-                    "x-raw-bitmap DataSize in header ({}) does not match calculated size ({}) from WxHxC.",
-                    data_size_from_header, calculated_pixel_data_size
-                )));
-            }
-
-            let expected_total_size = 16 + data_size_from_header as usize;
-            if file_data.len() != expected_total_size {
-                return Err(AppError::ImageProcessingError(format!(
-                    "x-raw-bitmap total file size ({}) does not match expected size based on header ({}).",
-                    file_data.len(),
-                    expected_total_size
-                )));
-            }
-
-            // Extract pixel data (skip the 16-byte header).
-            let data_vec = file_data[16..].to_vec();
-
-            Ok((
-                data_vec,
-                width,
-                height,
-                header_channels_byte,
-                plugin_color_format,
-            ))
-        }
-        Some(unknown_content_type) => Err(AppError::UnsupportedMediaType(format!(
-            "Content type '{}' is not supported. Expected 'image/jpeg', 'image/png', 'image/webp', or 'image/x-raw-bitmap'.",
+        // If Content-Type is provided but not supported
+        (Some(unknown_content_type), _) => Err(AppError::UnsupportedMediaType(format!(
+            "Content type '{}' is not supported.",
             unknown_content_type
         ))),
     }
@@ -298,26 +209,43 @@ fn encode_output_image(
                 })?;
             Ok(([(header::CONTENT_TYPE, "image/jpeg")], buffer.into_inner()).into_response())
         }
-        OutputFormat::Raw { color_format } => {
-            tracing::debug!("Encoding output as x-raw-bitmap.");
+        OutputFormat::Bmp | OutputFormat::Tga | OutputFormat::Qoi => {
+            let (name, mime_type, format) = match plugin_output_format {
+                OutputFormat::Bmp => ("BMP", "image/bmp", ImageFormat::Bmp),
+                OutputFormat::Tga => ("TGA", "image/x-tga", ImageFormat::Tga),
+                OutputFormat::Qoi => ("QOI", "image/x-qoi", ImageFormat::Qoi),
+                _ => unreachable!(), // All cases handled above
+            };
 
-            // For x-raw-bitmap, we also need to prepend the 16-byte header.
-            let mut raw_bitmap_data = Vec::with_capacity(16 + raw_pixel_data.len());
-            raw_bitmap_data.extend_from_slice(b"RB"); // Magic bytes
-            raw_bitmap_data.push(match color_format {
-                plugin_ffi::UpsclrColorFormat::Rgb => 0x01,
-                plugin_ffi::UpsclrColorFormat::Bgr => 0x02,
-            }); // ColorFormat byte
-            raw_bitmap_data.push(channels); // Channels byte
-            let data_size_bytes = (raw_pixel_data.len() as u32).to_le_bytes();
-            raw_bitmap_data.extend_from_slice(&data_size_bytes); // DataSize (little-endian)
-            raw_bitmap_data.extend_from_slice(&width.to_le_bytes()); // Width (little-endian)
-            raw_bitmap_data.extend_from_slice(&height.to_le_bytes()); // Height (little-endian)
-            raw_bitmap_data.extend_from_slice(raw_pixel_data); // The pixel data itself
+            tracing::debug!("Encoding output as {}.", name);
+
+            let color_type_for_image_crate = match channels {
+                3 => image::ColorType::Rgb8,
+                4 => image::ColorType::Rgba8,
+                _ => {
+                    return Err(AppError::ImageProcessingError(format!(
+                        "Unsupported channel count ({}).",
+                        channels
+                    )));
+                }
+            };
+
+            let mut buffer = Cursor::new(Vec::new());
+            image::write_buffer_with_format(
+                &mut buffer,
+                raw_pixel_data,
+                width,
+                height,
+                color_type_for_image_crate,
+                format,
+            )
+            .map_err(|e| {
+                AppError::ImageProcessingError(format!("{} encoding failed: {}", name, e))
+            })?;
 
             Ok((
-                [(header::CONTENT_TYPE, "image/x-raw-bitmap")],
-                raw_bitmap_data,
+                [(header::CONTENT_TYPE, mime_type)],
+                buffer.into_inner(), // Bytes of the encoded image.
             )
                 .into_response())
         }
@@ -407,11 +335,13 @@ async fn extract_direct_image(
 
 // --- GET /plugins ---
 // Lists all loaded plugins and their available engines.
+#[axum::debug_handler]
 pub async fn get_plugins(
     State((plugin_manager, _)): State<(SharedPluginManager, SharedInstanceManager)>,
 ) -> Result<Json<Vec<PluginDescriptionResponse>>, AppError> {
     let descriptions: Vec<PluginDescriptionResponse> = plugin_manager
-        .read()?
+        .read()
+        .await
         .get_plugins()
         .iter()
         .map(|plugin_arc| PluginDescriptionResponse {
@@ -425,10 +355,12 @@ pub async fn get_plugins(
 
 // --- GET /instances ---
 // Lists all currently active engine instances.
+#[axum::debug_handler]
 pub async fn list_instances(
-    State((_, instance_manager)): State<(SharedPluginManager, SharedInstanceManager)>,
+    State((plugin_manager, instance_manager)): State<(SharedPluginManager, SharedInstanceManager)>,
 ) -> Result<Json<Vec<InstanceInfoForList>>, AppError> {
-    let instances_info = instance_manager.read()?.list_instances_info();
+    let _plugin_manager_guard = plugin_manager.read().await;
+    let instances_info = instance_manager.read().await.list_instances_info();
     tracing::debug!(
         "Returning {} active instance descriptions.",
         instances_info.len()
@@ -438,6 +370,7 @@ pub async fn list_instances(
 
 // --- POST /instances ---
 // Creates a new engine instance or validates configuration (if dry_run=true).
+#[axum::debug_handler]
 pub async fn create_instance_handler(
     // Combined state with both managers
     State((plugin_manager, instance_manager)): State<(SharedPluginManager, SharedInstanceManager)>,
@@ -452,9 +385,11 @@ pub async fn create_instance_handler(
         dry_run_active
     );
 
+    // Hold a read lock on the plugin manager
+    let plugin_manager = plugin_manager.read().await;
+
     // Find the specified plugin by its ID.
     let plugin_arc = plugin_manager
-        .read()?
         .find_plugin_by_id(&payload.plugin_id)
         .ok_or_else(|| AppError::PluginNotFound(payload.plugin_id.clone()))?;
 
@@ -560,7 +495,7 @@ pub async fn create_instance_handler(
     // it might be an error or an implicit pass. The current logic defaults it to Some(valid).
 
     // --- Instance Creation ---
-    let active_instance_arc = instance_manager.write()?.create_instance(
+    let active_instance_arc = instance_manager.write().await.create_instance(
         plugin_arc.clone(),
         engine_index,
         &config_json_str,
@@ -578,8 +513,9 @@ pub async fn create_instance_handler(
 
 // --- POST /instances/{uuid}/preload?scale=N ---
 // Preloads resources for a given engine instance and scale factor.
+#[axum::debug_handler]
 pub async fn preload_instance(
-    State((_, instance_manager)): State<(SharedPluginManager, SharedInstanceManager)>,
+    State((plugin_manager, instance_manager)): State<(SharedPluginManager, SharedInstanceManager)>,
     Path(uuid): Path<Uuid>,
     Query(params): Query<ScaleQueryParam>,
 ) -> Result<StatusCode, AppError> {
@@ -592,9 +528,13 @@ pub async fn preload_instance(
 
     tracing::info!("Preloading instance {} for scale {}", uuid, params.scale);
 
+    // Hold a read lock on the plugin manager
+    let _plugin_manager_guard = plugin_manager.read().await;
+
     // Retrieve the active instance. Arc is cloned to be moved into spawn_blocking.
     let instance_arc = instance_manager
-        .read()?
+        .read()
+        .await
         .get_instance(&uuid)
         .ok_or(AppError::InstanceNotFound)?;
 
@@ -644,20 +584,22 @@ pub async fn preload_instance(
 
 // --- DELETE /instances/{uuid} ---
 // Destroys an active engine instance.
+#[axum::debug_handler]
 pub async fn delete_instance_handler(
     State((_, instance_manager)): State<(SharedPluginManager, SharedInstanceManager)>,
     Path(uuid): Path<Uuid>, // Extract UUID from the URL path.
 ) -> Result<StatusCode, AppError> {
     tracing::debug!("Request to delete instance: {}", uuid);
-    instance_manager.write()?.delete_instance(&uuid)?;
+    instance_manager.write().await.delete_instance(&uuid)?;
     tracing::debug!("Successfully deleted instance: {}", uuid);
     Ok(StatusCode::NO_CONTENT)
 }
 
 // --- POST /instances/{uuid}/upscale?scale=N ---
 // Upscales an image using the specified engine instance.
+#[axum::debug_handler]
 pub async fn upscale_image(
-    State((_, instance_manager)): State<(SharedPluginManager, SharedInstanceManager)>,
+    State((plugin_manager, instance_manager)): State<(SharedPluginManager, SharedInstanceManager)>,
     Path(uuid): Path<Uuid>,
     Query(params): Query<ScaleQueryParam>,
     TypedHeader(accept_header): TypedHeader<headers::Accept>,
@@ -696,10 +638,14 @@ pub async fn upscale_image(
         extract_direct_image(request, &content_type).await?
     };
 
+    // Hold a read lock on the plugin manager
+    let plugin_manager_guard = plugin_manager.read().await;
+
     // --- Get Instance ---
     // Clone Arc<ActiveInstance> to be moved into the blocking task.
     let instance_arc = instance_manager
-        .read()?
+        .read()
+        .await
         .get_instance(&uuid)
         .ok_or(AppError::InstanceNotFound)?;
 
@@ -818,6 +764,8 @@ pub async fn upscale_image(
     }
     tracing::debug!("Upscaling operation completed successfully by plugin.");
 
+    drop(plugin_manager_guard);
+
     // --- Encode Output Image based on Accept Header ---
     // The `out_data_vec` now contains the raw pixel data from the plugin
     // Process the output image in a separate blocking task to avoid holding both buffers in memory
@@ -854,6 +802,7 @@ pub struct ResetQuery {
 }
 
 // Resets the instances and optionally plugins.
+#[axum::debug_handler]
 pub async fn reset(
     State((plugin_manager, instance_manager)): State<(SharedPluginManager, SharedInstanceManager)>,
     Query(query_params): Query<ResetQuery>,
@@ -862,8 +811,8 @@ pub async fn reset(
 
     tracing::info!("Received reset request. (plugins={})", reset_plugins);
 
-    let mut plugin_manager = plugin_manager.write()?;
-    let mut instance_manager = instance_manager.write()?;
+    let mut plugin_manager = plugin_manager.write().await;
+    let mut instance_manager = instance_manager.write().await;
 
     // First, clear instance manager
     tracing::debug!("Resetting all active engine instances.");

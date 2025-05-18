@@ -19,11 +19,8 @@ use clap::Parser;
 use instance_manager::InstanceManager;
 use plugin_manager::PluginManager;
 use socket2::{Domain, Protocol, Socket, Type};
-use std::{
-    net::SocketAddr,
-    sync::{Arc, RwLock},
-};
-use tokio::signal;
+use std::{net::SocketAddr, sync::Arc};
+use tokio::{signal, sync::RwLock};
 use tower_http::{
     cors::CorsLayer,                      // For Cross-Origin Resource Sharing
     trace::{DefaultMakeSpan, TraceLayer}, // For detailed request logging
@@ -162,8 +159,11 @@ async fn main() {
 
     tracing::info!("upsclr-server has shut down.");
 
-    instance_manager_arc.write().unwrap().cleanup(true);
-    plugin_manager_arc.write().unwrap().cleanup(true);
+    let mut plugin_manager = plugin_manager_arc.write().await;
+    let mut instance_manager = instance_manager_arc.write().await;
+
+    instance_manager.cleanup(true);
+    plugin_manager.cleanup(true);
 }
 
 async fn create_listener(
