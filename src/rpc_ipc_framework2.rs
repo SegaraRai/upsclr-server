@@ -244,6 +244,12 @@ where
     pub async fn shutdown(self) {
         info!("Shutting down RPC server gracefully...");
 
+        // First clean up the server executor without waiting
+        // This helps prevent the "Requests stream errored out" warning
+        // by making sure the executor is shut down cleanly before
+        // we fully terminate the server task
+        self.server_executor_task.abort();
+
         // Signal the server to shut down
         let _ = self.shutdown_token.send(());
 
@@ -262,9 +268,6 @@ where
                 warn!("RPC server task did not complete within timeout, aborting");
             }
         }
-
-        // Clean up the server executor
-        self.server_executor_task.abort();
 
         info!("RPC server shutdown complete");
     }
@@ -386,16 +389,19 @@ where
 /// Factory for creating bridge tasks
 pub struct BridgeFactory;
 
+pub struct BridgeResult<T>(std::pin::Pin<std::boxed::Box<T>>);
+
 impl BridgeFactory {
     /// Create a bridge between IPC and tarpc channels
-    pub fn create_ipc_bridge<Rx, Tx>(
+    pub fn create_ipc_bridge<Rx, Tx, T>(
         ipc_rx: IpcReceiver<Rx>,
         ipc_tx: IpcSender<Tx>,
-        tarpc_transport: impl Transport<Rx, Tx> + Send + 'static,
-    ) -> JoinHandle<()>
+        tarpc_transport: T,
+    ) -> JoinHandle<BridgeResult<T>>
     where
         Rx: Serialize + for<'de> Deserialize<'de> + Send + 'static,
         Tx: Serialize + for<'de> Deserialize<'de> + Send + 'static,
+        T: Transport<Rx, Tx> + Send + 'static,
     {
         tokio::spawn(async move {
             let mut ipc_rx_stream = ipc_rx.to_stream();
@@ -409,14 +415,15 @@ impl BridgeFactory {
                         match message {
                             Some(Ok(msg)) => {
                                 if let Err(err) = tarpc_transport.send(msg).await {
-                                    error!("Bridge: Error sending to tarpc transport: {}", err);
+                                    // During shutdown, this is expected and normal
+                                    info!("Bridge: Could not send to tarpc transport (likely during shutdown): {}", err);
                                 }
                             },
                             Some(Err(err)) => {
                                 error!("Bridge: Error receiving from IPC: {}", err);
                             },
                             None => {
-                                warn!("Bridge: IPC channel closed");
+                                info!("Bridge: IPC channel closed");
                                 break;
                             }
                         }
@@ -427,14 +434,15 @@ impl BridgeFactory {
                         match message {
                             Some(Ok(msg)) => {
                                 if let Err(err) = ipc_tx.send(msg) {
-                                    error!("Bridge: Error sending to IPC: {}", err);
+                                    // During shutdown, this is expected and normal
+                                    info!("Bridge: Could not send to IPC (likely during shutdown): {}", err);
                                 }
                             },
                             Some(Err(err)) => {
                                 error!("Bridge: Error receiving from tarpc transport: {}", err);
                             },
                             None => {
-                                warn!("Bridge: tarpc transport closed");
+                                info!("Bridge: tarpc transport closed");
                                     break;
                             }
                         }
@@ -443,6 +451,8 @@ impl BridgeFactory {
             }
 
             info!("Bridge task exiting");
+
+            BridgeResult(tarpc_transport.into_inner())
         })
     }
 }
@@ -474,7 +484,20 @@ impl MainProcessClientFactory {
                 >,
             >,
         >,
-    ) -> Result<(RpcClient<C, Req, Resp>, JoinHandle<()>), Box<dyn std::error::Error>>
+    ) -> Result<
+        (
+            RpcClient<C, Req, Resp>,
+            JoinHandle<
+                BridgeResult<
+                    tarpc::transport::channel::UnboundedChannel<
+                        tarpc::ClientMessage<Req>,
+                        tarpc::Response<Resp>,
+                    >,
+                >,
+            >,
+        ),
+        Box<dyn std::error::Error>,
+    >
     where
         C: Clone + Send + 'static,
         Req: tarpc::RequestName + Serialize + for<'de> Deserialize<'de> + Send + 'static,
@@ -568,7 +591,20 @@ impl RpcHostServerFactory {
         ipc_request_rx: IpcReceiver<ClientMessage<Req>>,
         ipc_response_tx: IpcSender<Response<Resp>>,
         config: RpcServerConfig,
-    ) -> Result<(RpcServer<S, Req, Resp>, JoinHandle<()>), Box<dyn std::error::Error>>
+    ) -> Result<
+        (
+            RpcServer<S, Req, Resp>,
+            JoinHandle<
+                BridgeResult<
+                    tarpc::transport::channel::UnboundedChannel<
+                        tarpc::Response<Resp>,
+                        tarpc::ClientMessage<Req>,
+                    >,
+                >,
+            >,
+        ),
+        Box<dyn std::error::Error>,
+    >
     where
         S: Clone + Send + 'static,
         Req: tarpc::RequestName + Send + Serialize + for<'de> Deserialize<'de> + 'static,
@@ -665,9 +701,16 @@ mod examples {
         let pid = client.inner_client().get_pid(context::current()).await?;
         println!("RPC host PID: {}", pid);
 
-        // Graceful shutdown
+        // Graceful shutdown - first shutdown the client
         client.shutdown().await;
+
+        // Small delay to allow pending operations to complete
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Then shutdown the bootstrap which sends shutdown signal to RPC host
         bootstrap.shutdown().await;
+
+        // Finally wait for bridge task to complete
         bridge_task.await?;
 
         Ok(())
@@ -717,12 +760,18 @@ mod examples {
         // Wait for some signal to shutdown
         tokio::signal::ctrl_c().await?;
 
-        // Graceful shutdown
-        server.shutdown().await;
-        bridge_task.await?;
-
-        // Cancel bootstrap monitor if it's still running
+        // Graceful shutdown - first cancel bootstrap monitor
+        // which might be waiting for messages
         bootstrap_monitor.abort();
+
+        // Small delay to allow pending operations to complete
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Then shutdown the server
+        server.shutdown().await;
+
+        // Wait for bridge task to complete
+        bridge_task.await?;
 
         Ok(())
     }

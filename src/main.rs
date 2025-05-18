@@ -71,9 +71,13 @@ async fn example_main_process() -> Result<(), Box<dyn std::error::Error>> {
     let pid = client.inner_client().get_pid(context::current()).await?;
     println!("RPC host PID: {}", pid);
 
-    // Graceful shutdown
+    // Graceful shutdown - first shutdown the client
     client.shutdown().await;
+
+    // Then shutdown the bootstrap which sends shutdown signal to RPC host
     bootstrap.shutdown().await;
+
+    // Finally wait for bridge task to complete
     bridge_task.await?;
 
     Ok(())
@@ -90,11 +94,9 @@ async fn example_rpc_host(bootstrap_name: &str) -> Result<(), Box<dyn std::error
     let (server, bridge_task) = RpcHostServerFactory::create_server(
         PidServer,
         |server, channel| {
-            channel
-                .execute(server.serve())
-                .for_each(|response| async move {
-                    tokio::spawn(response);
-                })
+            channel.execute(server.serve()).for_each(|response| async {
+                tokio::spawn(response);
+            })
         },
         request_rx,
         response_tx,
@@ -112,7 +114,7 @@ async fn example_rpc_host(bootstrap_name: &str) -> Result<(), Box<dyn std::error
                 }
                 BootstrapConfirmation::Shutdown => {
                     info!("RPC host: Received shutdown request from main process");
-                    break;
+                    //break;
                 }
             }
         }
@@ -131,8 +133,10 @@ async fn example_rpc_host(bootstrap_name: &str) -> Result<(), Box<dyn std::error
         }
     }
 
-    // Graceful shutdown
+    // Then shutdown the server
     server.shutdown().await;
+
+    // Wait for bridge task to complete
     bridge_task.await?;
 
     Ok(())
