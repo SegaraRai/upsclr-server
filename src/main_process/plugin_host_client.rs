@@ -7,11 +7,9 @@ use crate::models::{
 };
 use crate::plugin_host_service::PluginHostServiceClient;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 use tarpc::context;
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
 use tracing::info;
 use uuid::Uuid;
 
@@ -26,22 +24,29 @@ pub enum PluginHostRespawnMode {
     NoRestart,
 }
 
-// Represents a connection to a plugin host process
-pub struct PluginHostConnection {
+pub struct PluginHostProcess {
     // Dispatcher
     _dispatcher_task: tokio::task::JoinHandle<()>,
     // The actual RPC client
     client: PluginHostServiceClient,
     // The plugin host process
-    process: Arc<Mutex<Option<Child>>>,
+    process: Child,
+}
+
+// Represents a connection to a plugin host process
+pub struct PluginHostConnection {
     // The plugin ID for the loaded plugin
     plugin_id: Uuid,
     // Path to the plugin file
     plugin_path: PathBuf,
+    // Latest plugin information with its engine instances
+    plugin_info: Option<PluginInfo>,
     // Whether the plugin has been loaded successfully
     plugin_loaded: bool,
-    // Latest plugin information with its engine instances
-    plugin_info: Arc<Mutex<Option<PluginInfo>>>,
+    // Respawn mode for the plugin host process
+    respawn_mode: PluginHostRespawnMode,
+    // Plugin host process
+    process: Option<PluginHostProcess>,
 }
 
 impl PluginHostConnection {
@@ -79,15 +84,21 @@ impl PluginHostConnection {
             tracing::info!("Dispatcher task finished");
         });
 
-        // Create the connection
-        let connection = Self {
+        // Create the process
+        let plugin_host_process = PluginHostProcess {
             _dispatcher_task: dispatcher_task,
             client,
-            process: Arc::new(Mutex::new(Some(process))),
+            process,
+        };
+
+        // Create the connection
+        let connection = Self {
             plugin_id,
             plugin_path,
+            plugin_info: None,
             plugin_loaded: false,
-            plugin_info: Arc::new(Mutex::new(None)),
+            respawn_mode: PluginHostRespawnMode::RestartOnCrash,
+            process: Some(plugin_host_process),
         };
 
         Ok(connection)
@@ -106,62 +117,90 @@ impl PluginHostConnection {
         ctx.deadline = std::time::Instant::now() + Duration::from_secs(30);
 
         // Load the plugin
-        let result = self
-            .client
-            .load_plugin(ctx, self.plugin_id, self.plugin_path.clone())
-            .await
-            .map_err(|e| PluginHostError::PluginLoadError(format!("RPC error: {}", e)))??;
+        if let Some(process) = &mut self.process {
+            let result = process
+                .client
+                .load_plugin(ctx, self.plugin_id, self.plugin_path.clone())
+                .await
+                .map_err(|e| PluginHostError::PluginLoadError(format!("RPC error: {}", e)))??;
 
-        self.plugin_loaded = true;
+            self.plugin_loaded = true;
 
-        // Store the plugin info
-        let mut info_guard = self.plugin_info.lock().await;
-        *info_guard = Some(result.clone());
+            // Store the plugin info
+            self.plugin_info = Some(result.clone());
 
-        Ok(result)
+            Ok(result)
+        } else {
+            Err(PluginHostError::InternalError(
+                "Plugin host process not available".to_string(),
+            ))
+        }
     }
 
     // Get the process ID of the plugin host
     pub async fn get_process_id(&self) -> Result<u32, PluginHostError> {
-        let ctx = context::current();
-        self.client
-            .get_process_id(ctx)
-            .await
-            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))
+        if let Some(process) = &self.process {
+            let ctx = context::current();
+            process
+                .client
+                .get_process_id(ctx)
+                .await
+                .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))
+        } else {
+            Err(PluginHostError::InternalError(
+                "Plugin host process not available".to_string(),
+            ))
+        }
     }
 
     // Get the status of the plugin host
     pub async fn get_status(&self) -> Result<PluginHostStatus, PluginHostError> {
-        let ctx = context::current();
-        self.client
-            .get_status(ctx)
-            .await
-            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))
+        if let Some(process) = &self.process {
+            let ctx = context::current();
+            process
+                .client
+                .get_status(ctx)
+                .await
+                .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))
+        } else {
+            Err(PluginHostError::InternalError(
+                "Plugin host process not available".to_string(),
+            ))
+        }
     }
 
     // Exit the plugin host process
     pub async fn exit(&self) -> Result<(), PluginHostError> {
-        let ctx = context::current();
-        self.client
-            .exit(ctx)
-            .await
-            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))
+        if let Some(process) = &self.process {
+            let ctx = context::current();
+            process
+                .client
+                .exit(ctx)
+                .await
+                .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))
+        } else {
+            Err(PluginHostError::InternalError(
+                "Plugin host process not available".to_string(),
+            ))
+        }
     }
 
     // Wait for the plugin host process to exit gracefully
-    pub async fn wait_for_exit(&self) -> Result<(), std::io::Error> {
-        let mut process_guard = self.process.lock().await;
-        if let Some(mut process) = process_guard.take() {
-            process.wait().await?;
+    pub async fn wait_for_exit(&mut self) -> Result<(), std::io::Error> {
+        if let Some(process) = self.process.take() {
+            let mut child_process = process.process;
+            child_process.wait().await?;
+            // Don't put the process back since it's now exited
         }
         Ok(())
     }
 
     // Kill the plugin host process forcefully
-    pub async fn kill(&self) -> Result<(), std::io::Error> {
-        let mut process_guard = self.process.lock().await;
-        if let Some(mut process) = process_guard.take() {
-            process.kill().await?;
+    pub async fn kill(&mut self) -> Result<(), std::io::Error> {
+        if let Some(process) = self.process.take() {
+            let mut child_process = process.process;
+            child_process.kill().await?;
+            // Don't put the process back since it's now killed
         }
         Ok(())
     }
@@ -182,16 +221,23 @@ impl PluginHostConnection {
             PluginHostError::InvalidParameter(format!("Failed to serialize config: {}", err))
         })?;
 
-        let ctx = context::current();
-        self.client
-            .validate_engine_config(ctx, self.plugin_id, engine_name, config_str)
-            .await
-            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))?
+        if let Some(process) = &self.process {
+            let ctx = context::current();
+            process
+                .client
+                .validate_engine_config(ctx, self.plugin_id, engine_name, config_str)
+                .await
+                .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))?
+        } else {
+            Err(PluginHostError::InternalError(
+                "Plugin host process not available".to_string(),
+            ))
+        }
     }
 
     // Create an engine instance
     pub async fn create_engine_instance(
-        &self,
+        &mut self,
         config: EngineInstanceConfig,
     ) -> Result<EngineInstance, PluginHostError> {
         if !self.plugin_loaded {
@@ -200,42 +246,58 @@ impl PluginHostConnection {
             ));
         }
 
-        let ctx = context::current();
-        let result = self
-            .client
-            .create_engine_instance(ctx, config)
-            .await
-            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))??;
+        if let Some(process) = &mut self.process {
+            let ctx = context::current();
+            let result = process
+                .client
+                .create_engine_instance(ctx, config)
+                .await
+                .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))??;
 
-        // Update plugin info after mutation
-        self.update_plugin_info().await?;
+            // Update plugin info after mutation
+            self.update_plugin_info().await?;
 
-        Ok(result)
+            Ok(result)
+        } else {
+            Err(PluginHostError::InternalError(
+                "Plugin host process not available".to_string(),
+            ))
+        }
     }
 
     // Destroy an engine instance
-    pub async fn destroy_engine_instance(&self, instance_id: Uuid) -> Result<(), PluginHostError> {
+    pub async fn destroy_engine_instance(
+        &mut self,
+        instance_id: Uuid,
+    ) -> Result<(), PluginHostError> {
         if !self.plugin_loaded {
             return Err(PluginHostError::PluginNotFound(
                 "Plugin not loaded".to_string(),
             ));
         }
 
-        let ctx = context::current();
-        self.client
-            .destroy_engine_instance(ctx, instance_id)
-            .await
-            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))??;
+        if let Some(process) = &mut self.process {
+            let ctx = context::current();
+            process
+                .client
+                .destroy_engine_instance(ctx, instance_id)
+                .await
+                .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))??;
 
-        // Update plugin info after mutation
-        self.update_plugin_info().await?;
+            // Update plugin info after mutation
+            self.update_plugin_info().await?;
 
-        Ok(())
+            Ok(())
+        } else {
+            Err(PluginHostError::InternalError(
+                "Plugin host process not available".to_string(),
+            ))
+        }
     }
 
     // Recreate an engine instance
     pub async fn recreate_engine_instance(
-        &self,
+        &mut self,
         id: Uuid,
         config: Option<EngineInstanceConfig>,
     ) -> Result<EngineInstance, PluginHostError> {
@@ -245,17 +307,23 @@ impl PluginHostConnection {
             ));
         }
 
-        let ctx = context::current();
-        let result = self
-            .client
-            .recreate_engine_instance(ctx, id, config)
-            .await
-            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))??;
+        if let Some(process) = &mut self.process {
+            let ctx = context::current();
+            let result = process
+                .client
+                .recreate_engine_instance(ctx, id, config)
+                .await
+                .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))??;
 
-        // Update plugin info after mutation
-        self.update_plugin_info().await?;
+            // Update plugin info after mutation
+            self.update_plugin_info().await?;
 
-        Ok(result)
+            Ok(result)
+        } else {
+            Err(PluginHostError::InternalError(
+                "Plugin host process not available".to_string(),
+            ))
+        }
     }
 
     // Preload an engine instance
@@ -266,11 +334,18 @@ impl PluginHostConnection {
             ));
         }
 
-        let ctx = context::current();
-        self.client
-            .preload(ctx, id, params)
-            .await
-            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))?
+        if let Some(process) = &self.process {
+            let ctx = context::current();
+            process
+                .client
+                .preload(ctx, id, params)
+                .await
+                .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))?
+        } else {
+            Err(PluginHostError::InternalError(
+                "Plugin host process not available".to_string(),
+            ))
+        }
     }
 
     // Upscale an image
@@ -285,43 +360,58 @@ impl PluginHostConnection {
             ));
         }
 
-        let ctx = context::current();
-        self.client
-            .upscale(ctx, id, params)
-            .await
-            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))?
+        if let Some(process) = &self.process {
+            let ctx = context::current();
+            process
+                .client
+                .upscale(ctx, id, params)
+                .await
+                .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))?
+        } else {
+            Err(PluginHostError::InternalError(
+                "Plugin host process not available".to_string(),
+            ))
+        }
     }
 
     // Update plugin info from the plugin host
-    async fn update_plugin_info(&self) -> Result<(), PluginHostError> {
+    async fn update_plugin_info(&mut self) -> Result<(), PluginHostError> {
         if !self.plugin_loaded {
             return Ok(());
         }
 
-        let ctx = context::current();
-        let plugin_info = self
-            .client
-            .get_plugin_info(ctx, self.plugin_id)
-            .await
-            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))??;
+        if let Some(process) = &mut self.process {
+            let ctx = context::current();
+            let plugin_info = process
+                .client
+                .get_plugin_info(ctx, self.plugin_id)
+                .await
+                .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))??;
 
-        let mut info_guard = self.plugin_info.lock().await;
-        *info_guard = Some(plugin_info);
-
-        Ok(())
+            self.plugin_info = Some(plugin_info);
+            Ok(())
+        } else {
+            Err(PluginHostError::InternalError(
+                "Plugin host process not available".to_string(),
+            ))
+        }
     }
 
     // Get the current plugin info
-    pub async fn get_plugin_info(&self) -> Result<Option<PluginInfo>, PluginHostError> {
-        if !self.plugin_loaded {
+    pub async fn get_plugin_info(
+        &mut self,
+        no_cache: bool,
+    ) -> Result<Option<PluginInfo>, PluginHostError> {
+        if no_cache && !self.plugin_loaded {
             return Ok(None);
         }
 
         // Update from the plugin host to get the latest info
-        self.update_plugin_info().await?;
+        if !no_cache {
+            self.update_plugin_info().await?;
+        }
 
         // Return the stored info
-        let info_guard = self.plugin_info.lock().await;
-        Ok(info_guard.clone())
+        Ok(self.plugin_info.clone())
     }
 }

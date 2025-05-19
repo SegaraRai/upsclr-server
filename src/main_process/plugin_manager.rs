@@ -124,8 +124,8 @@ impl PluginManager {
             .await
             .ok_or_else(|| PluginHostError::PluginNotFound(config.plugin_id.to_string()))?;
 
-        // Call the plugin host
-        let connection = plugin_host.read().await;
+        // Call the plugin host - use write lock for &mut self method
+        let mut connection = plugin_host.write().await;
         connection.create_engine_instance(config).await
     }
 
@@ -141,8 +141,8 @@ impl PluginManager {
             .await
             .ok_or_else(|| PluginHostError::PluginNotFound(plugin_id.to_string()))?;
 
-        // Call the plugin host
-        let connection = plugin_host.read().await;
+        // Call the plugin host - use write lock for &mut self method
+        let mut connection = plugin_host.write().await;
         connection.destroy_engine_instance(instance_id).await
     }
 
@@ -159,8 +159,8 @@ impl PluginManager {
             .await
             .ok_or_else(|| PluginHostError::PluginNotFound(plugin_id.to_string()))?;
 
-        // Call the plugin host
-        let connection = plugin_host.read().await;
+        // Call the plugin host - use write lock for &mut self method
+        let mut connection = plugin_host.write().await;
         connection
             .recreate_engine_instance(instance_id, config)
             .await
@@ -226,18 +226,24 @@ impl PluginManager {
         let exit_futures: Vec<_> = plugin_hosts
             .iter()
             .map(async |(plugin_id, connection_arc)| {
-                let connection = connection_arc.read().await;
-                info!("Exiting plugin host for plugin: {}", plugin_id);
+                // First send exit command with a read lock
+                {
+                    let connection = connection_arc.read().await;
+                    info!("Exiting plugin host for plugin: {}", plugin_id);
 
-                // Send RPC command
-                let _ = connection.exit().await.inspect_err(|err| {
-                    error!("Error exiting plugin host: {:?}", err);
-                });
+                    // Send RPC command
+                    let _ = connection.exit().await.inspect_err(|err| {
+                        error!("Error exiting plugin host: {:?}", err);
+                    });
+                }
 
-                // Then, wait for the exit to complete
-                let _ = connection.wait_for_exit().await.inspect_err(|err| {
-                    error!("Error waiting for plugin host exit: {:?}", err);
-                });
+                // Then, wait for the exit to complete with a write lock
+                {
+                    let mut connection = connection_arc.write().await;
+                    let _ = connection.wait_for_exit().await.inspect_err(|err| {
+                        error!("Error waiting for plugin host exit: {:?}", err);
+                    });
+                }
             })
             .collect();
 
@@ -249,7 +255,7 @@ impl PluginManager {
     pub async fn kill_all(&self, timeout: Duration) {
         // Kill sequentially to avoid overwhelming the system
         for (plugin_id, connection_arc) in self.plugin_hosts.read().await.iter() {
-            let connection = connection_arc.read().await;
+            let mut connection = connection_arc.write().await;
             info!("Killing plugin host for plugin: {}", plugin_id);
             match tokio::time::timeout(timeout, connection.kill()).await {
                 Ok(Ok(())) => {
