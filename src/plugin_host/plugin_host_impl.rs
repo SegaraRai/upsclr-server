@@ -355,4 +355,101 @@ impl PluginHostService for PluginHostServiceImpl {
 
         Ok(plugin_info)
     }
+
+    // Restore engine instances from saved plugin info
+    async fn restore(
+        self,
+        _: Context,
+        saved_plugin_info: Option<PluginInfo>,
+    ) -> Result<PluginInfo, PluginHostError> {
+        // Check if we have saved plugin info to restore from
+        if let Some(saved_info) = saved_plugin_info {
+            info!(
+                "Restoring plugin host state with {} engine instances from saved plugin info",
+                saved_info.engine_instances.len()
+            );
+
+            // Get the loaded plugin
+            let plugin_guard = self.plugin.read().unwrap();
+            let plugin = plugin_guard.as_ref().ok_or_else(|| {
+                PluginHostError::PluginNotFound("No plugin loaded in this plugin host".to_string())
+            })?;
+
+            // Check if this is the correct plugin ID
+            if plugin.id != saved_info.plugin_id {
+                return Err(PluginHostError::PluginNotFound(format!(
+                    "Plugin ID mismatch during restore. Expected: {}, but this host has: {}",
+                    saved_info.plugin_id, plugin.id
+                )));
+            }
+
+            // Get the instance manager
+            let instance_manager_guard = self.instance_manager.read().unwrap();
+            let instance_manager = instance_manager_guard.as_ref().ok_or_else(|| {
+                PluginHostError::InternalError("Instance manager not initialized".to_string())
+            })?;
+
+            // Track overall result of the restore operation
+            let mut restore_success_count = 0;
+            let total_to_restore = saved_info.engine_instances.len();
+
+            // Recreate each engine instance
+            for instance in &saved_info.engine_instances {
+                // Create an instance config based on the saved instance
+                let config = EngineInstanceConfig {
+                    instance_id: instance.config.instance_id,
+                    plugin_id: plugin.id,
+                    engine_name: instance.config.engine_name.clone(),
+                    engine_config: instance.config.engine_config.clone(),
+                };
+
+                // Create the instance
+                match instance_manager.create_instance(config) {
+                    Ok(_) => {
+                        info!(
+                            "Successfully restored engine instance: {}",
+                            instance.config.instance_id
+                        );
+                        restore_success_count += 1;
+                    }
+                    Err(err) => {
+                        error!(
+                            "Failed to restore engine instance {}: {:?}",
+                            instance.config.instance_id, err
+                        );
+                        // Continue with other instances even if one fails
+                    }
+                }
+            }
+
+            // Get updated plugin info with all restored instances
+            let mut plugin_info = plugin.plugin_info.clone();
+            plugin_info.engine_instances = instance_manager.get_all_instances();
+
+            info!(
+                "Plugin state restore completed. Successfully restored {}/{} engine instances",
+                restore_success_count, total_to_restore
+            );
+
+            // Track the restore operation in statistics
+            self.track_operation::<_, ()>(&Ok(()));
+
+            Ok(plugin_info)
+        } else {
+            // No saved state to restore from, just return current plugin info
+            let plugin_guard = self.plugin.read().unwrap();
+            let plugin = plugin_guard.as_ref().ok_or_else(|| {
+                PluginHostError::PluginNotFound("No plugin loaded in this plugin host".to_string())
+            })?;
+
+            let mut plugin_info = plugin.plugin_info.clone();
+
+            // Update engine instances list
+            if let Some(instance_manager) = self.instance_manager.read().unwrap().as_ref() {
+                plugin_info.engine_instances = instance_manager.get_all_instances();
+            }
+
+            Ok(plugin_info)
+        }
+    }
 }

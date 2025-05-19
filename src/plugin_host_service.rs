@@ -50,4 +50,8 @@ pub trait PluginHostService {
 
     /// Run upscaling operation in the specified engine instance
     async fn upscale(id: Uuid, params: UpscaleParams) -> Result<UpscaleResult, PluginHostError>;
+
+    /// Restore engine instances from saved plugin info
+    /// Used after plugin host respawn to recreate the previous state
+    async fn restore(saved_plugin_info: Option<PluginInfo>) -> Result<PluginInfo, PluginHostError>;
 }

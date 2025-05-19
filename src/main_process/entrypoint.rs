@@ -1,6 +1,7 @@
 // Entry point for the main process
 // Handles initialization of the plugin manager and API server
 
+use crate::main_process::plugin_host_client::PluginHostRespawnMode;
 use crate::main_process::web::{create_app, create_listener};
 use crate::{main_process::plugin_manager::PluginManager, shutdown_signal::shutdown_signal};
 use clap::Parser;
@@ -85,6 +86,12 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Exit all plugin hosts gracefully
     info!("Exiting plugin hosts...");
+
+    plugin_manager_arc
+        .read()
+        .await
+        .set_respawn_mode_all(PluginHostRespawnMode::NoRestart)
+        .await;
 
     let exit_all_task = async {
         plugin_manager_arc.read().await.exit_all().await;

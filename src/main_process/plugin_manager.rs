@@ -1,6 +1,6 @@
 // Manages plugin host processes
 
-use crate::main_process::plugin_host_client::PluginHostConnection;
+use super::plugin_host_client::{PluginHostConnection, PluginHostRespawnMode};
 use crate::models::{
     EngineConfigValidationResult, EngineInstance, EngineInstanceConfig, PluginHostError,
     PluginHostStatus, PluginInfo, PreloadParams, UpscaleParams, UpscaleResult,
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 // Manages all plugin hosts
@@ -36,15 +36,12 @@ impl PluginManager {
         let plugin_id = Uuid::new_v4();
 
         // Start the plugin host process
-        let mut connection = PluginHostConnection::start_plugin_host(
-            self.executable_path.clone(),
-            plugin_id,
-            plugin_path.clone(),
-        )
-        .await
-        .map_err(|e| {
-            PluginHostError::PluginLoadError(format!("Failed to start plugin host: {}", e))
-        })?;
+        let mut connection =
+            PluginHostConnection::new(self.executable_path.clone(), plugin_id, plugin_path.clone())
+                .await
+                .map_err(|e| {
+                    PluginHostError::PluginLoadError(format!("Failed to start plugin host: {}", e))
+                })?;
 
         // Perform some basic RPC calls to make debug easier
         let pid = connection.get_process_id().await.map_err(|e| {
@@ -216,6 +213,30 @@ impl PluginManager {
         // Call the plugin host
         let connection = plugin_host.read().await;
         connection.get_status().await
+    }
+
+    pub async fn set_respawn_mode_all(&self, respawn_mode: PluginHostRespawnMode) {
+        let plugin_hosts = self.plugin_hosts.read().await;
+
+        // Set respawn mode concurrently to avoid blocking
+        let set_futures: Vec<_> = plugin_hosts
+            .iter()
+            .map(|(_, connection_arc)| {
+                let connection_arc = Arc::clone(connection_arc);
+                async move {
+                    let mut connection = connection_arc.write().await;
+                    let _ = connection
+                        .set_respawn_mode(respawn_mode)
+                        .await
+                        .inspect_err(|err| {
+                            warn!("Error setting respawn mode: {:?}", err);
+                        });
+                }
+            })
+            .collect();
+
+        // Wait for all to complete
+        futures::future::join_all(set_futures).await;
     }
 
     // Exit all plugin hosts gracefully
