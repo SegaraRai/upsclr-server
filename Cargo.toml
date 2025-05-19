@@ -39,6 +39,6 @@ tracing-subscriber = { version = "0.3", features = ["fmt"] }
 ipc-channel = { version = "0.19", features = ["async"] }
 tarpc = { version = "0.36", features = ["tokio1", "serde-transport", "tcp"] }
 futures = "0.3"
-tokio-serde = { version = "0.8", features = ["json"] }
+tokio-serde = { version = "0.9", features = ["json"] }
 bincode = { version = "2", features = ["serde"] }
 base64 = "0.22"

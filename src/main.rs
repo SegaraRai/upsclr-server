@@ -1,15 +1,10 @@
-mod rpc_ipc_framework2;
-
+use upsclr_server::ipc::{BootstrapClient, BootstrapHost};
 use futures::StreamExt;
-use rpc_ipc_framework2::{
-    BootstrapConfirmation, MainProcessBootstrap, MainProcessClientFactory, RpcClientConfig,
-    RpcHostBootstrapClient, RpcHostServerFactory, RpcServerConfig,
-};
+use std::time::Duration;
 use tarpc::{context, server::Channel};
-use tracing::{Level, info};
+use tracing::Level;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main_wrapper() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_max_level(Level::DEBUG)
         .with_target(true)
@@ -33,6 +28,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     example_main_process().await
 }
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create Tokio runtime")
+        .block_on(async {
+            let result = main_wrapper().await;
+
+            let result = result.inspect_err(|err| {
+                tracing::error!("Error in main process: {:?}", err);
+            });
+
+            // Create a timer to force the main process to exit after a timeout
+            // This is needed since `IpcOneShotServer::accept()` blocks indefinitely
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_secs(10));
+                tracing::warn!("Main process timed out, exiting...");
+                std::process::exit(1);
+            });
+
+            result
+        })
+}
+
 #[tarpc::service]
 pub trait PidService {
     async fn get_pid() -> u32;
@@ -44,41 +63,65 @@ pub struct PidServer;
 
 impl PidService for PidServer {
     async fn get_pid(self, _ctx: context::Context) -> u32 {
-        std::process::id()
+        tracing::debug!("Server handling get_pid request");
+        let pid = std::process::id();
+        tracing::debug!("Server returning PID: {}", pid);
+        pid
     }
 }
 
 // Main Process Example
 async fn example_main_process() -> Result<(), Box<dyn std::error::Error>> {
     // Create bootstrap server and wait for RPC host to connect
-    let (bootstrap, request_tx, response_rx) =
-        MainProcessBootstrap::<PidServiceRequest, PidServiceResponse>::new().await?;
+    let (bootstrap_host, bootstrap_name) = BootstrapHost::new()?;
+    tracing::info!("Tell RPC host to connect to bootstrap: {}", bootstrap_name);
 
-    println!(
-        "Tell RPC host to connect to bootstrap: {}",
-        bootstrap.bootstrap_name()
+    let (transport, _bootstrap_host) = bootstrap_host.accept(Duration::from_secs(20)).await?;
+    tracing::info!("RPC host connected to bootstrap");
+
+    // Configure tarpc client with longer timeout
+    let client_config = tarpc::client::Config::default();
+
+    tracing::debug!(
+        "Creating new RPC client with configuration: {:?}",
+        client_config
     );
-
-    // Create a client that talks to the RPC host with bridge
-    let (client, bridge_task) = MainProcessClientFactory::create_client(
-        request_tx,
-        response_rx,
-        RpcClientConfig::default(),
-        PidServiceClient::new,
-    )?;
+    // Create the service-specific client
+    let new_client = PidServiceClient::new(client_config, transport);
+    tracing::info!("New RPC client created");
 
     // Make RPC calls to the RPC host
-    let pid = client.inner_client().get_pid(context::current()).await?;
-    println!("RPC host PID: {}", pid);
+    tracing::debug!("Sending get_pid request to RPC host");
 
-    // Graceful shutdown - first shutdown the client
-    client.shutdown().await;
+    // Set a shorter timeout for debugging
+    let ctx = context::current();
 
-    // Then shutdown the bootstrap which sends shutdown signal to RPC host
-    bootstrap.shutdown().await;
+    let client = new_client.client;
+    let dispatch = new_client.dispatch;
+    let dispatch_handle = tokio::spawn(async move {
+        if let Err(e) = dispatch.await {
+            println!("RPC client dispatch error: {}", e);
+            Err(e)
+        } else {
+            Ok(())
+        }
+    });
 
-    // Finally wait for bridge task to complete
-    bridge_task.await?;
+    match client.get_pid(ctx).await {
+        Ok(pid) => {
+            tracing::debug!("Received successful response from RPC host");
+            println!("RPC host PID: {}", pid);
+        }
+        Err(e) => {
+            tracing::error!("Error calling get_pid on RPC host: {:?}", e);
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("RPC call failed: {:?}", e),
+            )));
+        }
+    }
+
+    dispatch_handle.abort();
 
     Ok(())
 }
@@ -86,58 +129,40 @@ async fn example_main_process() -> Result<(), Box<dyn std::error::Error>> {
 // RPC Host Example
 async fn example_rpc_host(bootstrap_name: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Connect to the main process
-    let (request_rx, response_tx, bootstrap_context) =
-        RpcHostBootstrapClient::connect::<PidServiceRequest, PidServiceResponse>(bootstrap_name)
-            .await?;
+    let (transport, _bootstrap_client) = BootstrapClient::connect(bootstrap_name)?;
+    println!(
+        "Connected to main process via bootstrap: {}",
+        bootstrap_name
+    );
 
-    // Create a server to handle requests from the main process
-    let (server, bridge_task) = RpcHostServerFactory::create_server(
-        PidServer,
-        |server, channel| {
-            channel.execute(server.serve()).for_each(|response| async {
+    // Configure server with longer timeouts
+    tracing::debug!("Creating server to handle requests");
+    let server = tarpc::server::BaseChannel::with_defaults(transport);
+
+    tracing::debug!("Setting up server task with PidServer implementation");
+    let server_task = tokio::spawn(
+        server
+            .execute(PidServer.serve())
+            // Handle all requests concurrently
+            .for_each(|response| async move {
+                tracing::debug!("Got a request, spawning handler task");
                 tokio::spawn(response);
-            })
-        },
-        request_rx,
-        response_tx,
-        RpcServerConfig::default(),
-    )
-    .await?;
+            }),
+    );
 
-    // Set up a task to monitor bootstrap confirmation messages
-    let bootstrap_monitor = tokio::spawn(async move {
-        let mut confirmation_rx = bootstrap_context.confirmation_rx.to_stream();
-        while let Some(Ok(confirmation)) = confirmation_rx.next().await {
-            match confirmation {
-                BootstrapConfirmation::Ready => {
-                    info!("RPC host: Received ready confirmation from main process");
-                }
-                BootstrapConfirmation::Shutdown => {
-                    info!("RPC host: Received shutdown request from main process");
-                    //break;
-                }
-            }
-        }
-        info!("RPC host: Bootstrap confirmation channel closed");
-    });
+    tracing::debug!("Server task started, waiting for shutdown signal");
 
     // Wait for some signal to shutdown
     let ctrl_c = tokio::signal::ctrl_c();
 
     tokio::select! {
-        _ = bootstrap_monitor => {
-            info!("RPC host: Bootstrap monitor completed");
-        }
         _ = ctrl_c => {
-            info!("RPC host: Ctrl-C received, shutting down");
+            tracing::info!("RPC host: Ctrl-C received, shutting down");
+        }
+        _ = server_task => {
+            tracing::info!("RPC host: Client disconnected, shutting down");
         }
     }
-
-    // Then shutdown the server
-    server.shutdown().await;
-
-    // Wait for bridge task to complete
-    bridge_task.await?;
 
     Ok(())
 }
