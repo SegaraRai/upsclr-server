@@ -7,8 +7,9 @@ use uuid::Uuid;
 pub enum PluginHostError {
     PluginNotFound(String),
     PluginLoadError(String),
+    EngineNotFound(String),
     EngineCreationFailed(String),
-    EngineNotFound(Uuid),
+    EngineInstanceNotFound(Uuid),
     OperationFailed(String),
     InvalidParameter(String),
     UnsupportedOperation(String),
@@ -41,7 +42,7 @@ pub struct PluginInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineInfo {
     pub engine_name: String,
-    pub engine_config_schema: serde_json::Value,
+    pub engine_config_schema: String, // JSON string, since bincode cannot serde_json::Value
 }
 
 /// Result of validating an engine configuration
@@ -58,7 +59,7 @@ pub struct EngineInstanceConfig {
     pub instance_id: Uuid,
     pub plugin_id: Uuid,
     pub engine_name: String,
-    pub engine_config: serde_json::Value,
+    pub engine_config: String, // JSON string, since bincode cannot serde_json::Value
 }
 
 /// Information about an engine instance

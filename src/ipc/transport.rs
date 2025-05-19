@@ -96,10 +96,10 @@ where
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        self.get_mut()
-            .rx
-            .poll_next_unpin(cx)
-            .map_err(IpcError::Bincode)
+        self.get_mut().rx.poll_next_unpin(cx).map_err(|e| {
+            tracing::error!("IPC stream error: {}", e);
+            IpcError::Bincode(e)
+        })
     }
 }
 
@@ -134,7 +134,10 @@ where
     /// It returns an error if serialization or sending fails.
     fn start_send(self: std::pin::Pin<&mut Self>, item: Tx) -> Result<(), Self::Error> {
         // Serialize the item and send it over the IPC channel
-        self.get_mut().tx.send(item).map_err(IpcError::Bincode)
+        self.get_mut().tx.send(item).map_err(|err| {
+            tracing::error!("Failed to send IPC message: {}", err);
+            IpcError::Bincode(err)
+        })
     }
 
     /// Flushes any buffered items to ensure they reach the receiver.
