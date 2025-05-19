@@ -2,11 +2,10 @@
 // Handles receiving the bootstrap client name and connecting to the main process
 
 use super::plugin_host_impl::PluginHostServiceImpl;
-use crate::ipc::BootstrapClient;
 use crate::plugin_host_service::PluginHostService;
+use crate::{ipc::BootstrapClient, shutdown_signal::shutdown_signal};
 use futures::StreamExt;
 use tarpc::server::Channel;
-use tokio::signal;
 use tracing::{debug, info};
 
 pub async fn main(bootstrap_name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -39,21 +38,12 @@ pub async fn main(bootstrap_name: &str) -> Result<(), Box<dyn std::error::Error>
 
     info!("Plugin host service started, waiting for shutdown signal");
 
-    let ctrl_c_twice = async {
-        // Wait for Ctrl-C signal
-        signal::ctrl_c().await.expect("Failed to listen for Ctrl-C");
-        info!("Plugin host received Ctrl-C, press Ctrl-C again to exit");
-
-        // Wait for Ctrl-C again to confirm exit
-        signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl-C again");
-    };
+    let shutdown_signal_task = shutdown_signal(true);
 
     // Wait for ctrl-c or client disconnection
     tokio::select! {
-        _ = ctrl_c_twice => {
-            info!("Plugin host received Ctrl-C twice, shutting down");
+        _ = shutdown_signal_task => {
+            info!("Plugin host received shutdown signal, shutting down");
         }
         _ = server_task => {
             info!("Main process disconnected, shutting down plugin host");

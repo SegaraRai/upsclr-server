@@ -1,6 +1,16 @@
+use clap::Parser;
 use std::time::Duration;
-
 use tracing::Level;
+
+#[derive(Parser, Debug)]
+#[command()]
+struct PluginHostConfig {
+    #[arg(long, env = "UPSCLR_SERVER_MODE", default_value = "main")]
+    mode: String,
+
+    #[arg(long, env = "UPSCLR_SERVER_IPC")]
+    ipc: String,
+}
 
 async fn main_wrapper() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -11,15 +21,10 @@ async fn main_wrapper() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Check if we are running in plugin host mode
-    let args: Vec<String> = std::env::args().collect();
-    if args.contains(&"--mode=plugin".to_string()) {
-        let ipc_name = args
-            .iter()
-            .find(|&arg| arg.starts_with("--ipc="))
-            .and_then(|arg| arg.split('=').nth(1))
-            .expect("IPC name must be provided in plugin host mode");
-
-        return upsclr_server::plugin_host::main(ipc_name).await;
+    if let Ok(config) = PluginHostConfig::try_parse() {
+        if config.mode == "plugin_host" {
+            return upsclr_server::plugin_host::main(&config.ipc).await;
+        }
     }
 
     // Run the main process

@@ -44,7 +44,7 @@ impl PluginHostConnection {
 
         // Start the plugin host process
         let process = Command::new(&executable_path)
-            .arg("--mode=plugin")
+            .arg("--mode=plugin_host")
             .arg(format!("--ipc={}", bootstrap_name))
             .spawn()?;
 
