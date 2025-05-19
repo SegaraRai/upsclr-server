@@ -24,7 +24,7 @@ pub trait PluginHostService {
     async fn validate_engine_config(
         plugin_id: Uuid,
         engine_name: String,
-        config: serde_json::Value,
+        config: String,
     ) -> Result<EngineConfigValidationResult, PluginHostError>;
 
     /// Create a new engine instance with the specified configuration

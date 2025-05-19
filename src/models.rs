@@ -41,8 +41,11 @@ pub struct PluginInfo {
 /// Configuration for an upscaling engine instance
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineInfo {
-    pub engine_name: String,
-    pub engine_config_schema: String, // JSON string, since bincode cannot serde_json::Value
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub config_schema: String, // JSON string, since bincode cannot serde_json::Value
+    pub plugin_id: Uuid,
 }
 
 /// Result of validating an engine configuration

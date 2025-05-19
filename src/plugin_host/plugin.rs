@@ -96,10 +96,9 @@ impl LoadedPlugin {
         c_str_ptr: *const plugin_ffi::c_char8_t,
     ) -> Result<String, String> {
         if c_str_ptr.is_null() {
-            // Decide how to handle nulls: empty string or an error.
-            // Returning an error is often safer to highlight plugin issues.
             return Err("Encountered a null string pointer from plugin".to_string());
         }
+
         CStr::from_ptr(c_str_ptr)
             .to_str()
             .map(String::from)
@@ -232,6 +231,21 @@ impl LoadedPlugin {
                     ))
                 })?;
 
+                let version = Self::c_str_to_rust_string(c_engine_info.version).map_err(|e| {
+                    PluginHostError::PluginLoadError(format!(
+                        "Invalid engine version (idx {}) from {:?}: {}",
+                        i, path, e
+                    ))
+                })?;
+
+                let description =
+                    Self::c_str_to_rust_string(c_engine_info.description).map_err(|e| {
+                        PluginHostError::PluginLoadError(format!(
+                            "Invalid engine description (idx {}) from {:?}: {}",
+                            i, path, e
+                        ))
+                    })?;
+
                 // Parse JSON schema
                 let schema_str = Self::c_str_to_rust_string(c_engine_info.config_json_schema)
                     .map_err(|e| {
@@ -256,8 +270,11 @@ impl LoadedPlugin {
                 })?;
 
                 engines_info.push(EngineInfo {
-                    engine_name: name,
-                    engine_config_schema: schema_json_str,
+                    name,
+                    version,
+                    description,
+                    config_schema: schema_json_str,
+                    plugin_id,
                 });
             }
 
@@ -338,7 +355,7 @@ impl LoadedPlugin {
         self.plugin_info
             .supported_engines
             .iter()
-            .position(|engine| engine.engine_name == engine_name)
+            .position(|engine| engine.name == engine_name)
     }
 
     // Validate engine configuration

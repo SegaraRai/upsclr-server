@@ -94,7 +94,11 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(Duration::from_secs(10)).await;
 
         warn!("Killing all plugin hosts...");
-        plugin_manager_arc.read().await.kill_all().await;
+        plugin_manager_arc
+            .read()
+            .await
+            .kill_all(Duration::from_secs(5))
+            .await;
     };
 
     tokio::select! {

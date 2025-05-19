@@ -3,13 +3,12 @@
 
 use std::os::raw::{c_char, c_void};
 
-// char8_t is specified as UTF-8. In C, this is typically 'char'.
-// For FFI, Rust's *const c_char (which is *const i8) is appropriate for C 'char *'.
+// For FFI, Rust's *const c_char (which is *const i8) is appropriate for C 'char *' and 'char8_t *'.
 #[allow(non_camel_case_types)]
 pub type c_char8_t = c_char;
 
 #[repr(C)]
-#[derive(Debug, Clone)] // Added Clone for potential copying if needed (careful with pointers)
+#[derive(Debug)]
 pub struct UpsclrPluginInfo {
     pub name: *const c_char8_t,
     pub version: *const c_char8_t,
@@ -17,7 +16,7 @@ pub struct UpsclrPluginInfo {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone)] // Added Clone
+#[derive(Debug)]
 pub struct UpsclrEngineInfo {
     pub name: *const c_char8_t,
     pub description: *const c_char8_t,
@@ -31,7 +30,7 @@ pub struct UpsclrEngineInfo {
 pub struct UpsclrEngineInstance(c_void); // Using c_void for an opaque struct
 
 #[repr(C)]
-#[derive(Debug)] // Removed Clone as it contains pointers to arrays managed by C code
+#[derive(Debug)]
 pub struct UpsclrEngineConfigValidationResult {
     pub is_valid: bool,
     pub error_count: usize,
@@ -41,7 +40,7 @@ pub struct UpsclrEngineConfigValidationResult {
 }
 
 #[repr(C)]
-#[derive(Debug, PartialEq, Eq, Clone, Copy)] // Make it fully usable in Rust comparisons
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[non_exhaustive]
 pub enum UpsclrErrorCode {
     Success = 0,                  // UPSCLR_SUCCESS
@@ -56,7 +55,7 @@ pub enum UpsclrErrorCode {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)] // Make it fully usable in Rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpsclrColorFormat {
     Rgb = 0, // UPSCLR_COLOR_FORMAT_RGB (Red, Green, Blue)
     Bgr = 1, // UPSCLR_COLOR_FORMAT_BGR (Blue, Green, Red)

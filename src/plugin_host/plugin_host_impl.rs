@@ -169,12 +169,16 @@ impl PluginHostService for PluginHostServiceImpl {
         _: Context,
         plugin_id: Uuid,
         engine_name: String,
-        config: serde_json::Value,
+        config: String,
     ) -> Result<EngineConfigValidationResult, PluginHostError> {
         info!(
             "Validating engine config for engine: {} in plugin: {}",
             engine_name, plugin_id
         );
+
+        let config = serde_json::from_str(&config).map_err(|err| {
+            PluginHostError::InvalidParameter(format!("Failed to parse config: {}", err))
+        })?;
 
         // Get the loaded plugin
         let plugin_guard = self.plugin.read().unwrap();

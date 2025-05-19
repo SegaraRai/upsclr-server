@@ -162,9 +162,13 @@ impl PluginHostConnection {
             ));
         }
 
+        let config_str = serde_json::to_string(&config).map_err(|err| {
+            PluginHostError::InvalidParameter(format!("Failed to serialize config: {}", err))
+        })?;
+
         let ctx = context::current();
         self.client
-            .validate_engine_config(ctx, self.plugin_id, engine_name, config)
+            .validate_engine_config(ctx, self.plugin_id, engine_name, config_str)
             .await
             .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))?
     }

@@ -8,6 +8,7 @@ use crate::models::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 use uuid::Uuid;
@@ -245,13 +246,27 @@ impl PluginManager {
     }
 
     // Kill all plugin hosts forcefully
-    pub async fn kill_all(&self) {
+    pub async fn kill_all(&self, timeout: Duration) {
         // Kill sequentially to avoid overwhelming the system
         for (plugin_id, connection_arc) in self.plugin_hosts.read().await.iter() {
             let connection = connection_arc.read().await;
             info!("Killing plugin host for plugin: {}", plugin_id);
-            if let Err(e) = connection.kill().await {
-                error!("Error killing plugin host: {:?}", e);
+            match tokio::time::timeout(timeout, connection.kill()).await {
+                Ok(Ok(())) => {
+                    info!("Successfully killed plugin host for plugin: {}", plugin_id);
+                }
+                Ok(Err(err)) => {
+                    error!(
+                        "Error killing plugin host for plugin {}: {}",
+                        plugin_id, err
+                    );
+                }
+                Err(err) => {
+                    error!(
+                        "Timeout while killing plugin host for plugin {}: {}",
+                        plugin_id, err
+                    );
+                }
             }
         }
     }
