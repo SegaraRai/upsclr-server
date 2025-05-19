@@ -31,7 +31,7 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line args and environment variables
     let config = AppConfig::parse();
 
-    info!("Starting main process");
+    info!("Starting main process at PID {}", std::process::id());
 
     // Get the executable path for spawning plugin hosts
     let executable_path = std::env::current_exe().expect("Failed to get executable path");

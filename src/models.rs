@@ -1,3 +1,4 @@
+use ipc_channel::ipc::IpcSharedMemory;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -89,7 +90,7 @@ pub struct UpscaleParams {
     pub channels: u32,
     pub input_color_format: ColorFormat,
     pub desired_color_format: ColorFormat,
-    pub input_data: Vec<u8>,
+    pub input_data: IpcSharedMemory,
 }
 
 /// Result of an upscaling operation
@@ -100,7 +101,7 @@ pub struct UpscaleResult {
     pub output_height: u32,
     pub channels: u32,
     pub output_color_format: ColorFormat,
-    pub output_data: Vec<u8>,
+    pub output_data: IpcSharedMemory,
 }
 
 /// Status information about the plugin host process

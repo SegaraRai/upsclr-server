@@ -7,6 +7,7 @@ use crate::models::{
 };
 use crate::plugin_host::plugin::LoadedPlugin;
 use crate::plugin_host::plugin_ffi;
+use ipc_channel::ipc::IpcSharedMemory;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::{Arc, RwLock};
@@ -269,7 +270,7 @@ impl InstanceManager {
             output_height: expected_height,
             channels: params.channels,
             output_color_format: params.desired_color_format,
-            output_data,
+            output_data: IpcSharedMemory::from_bytes(&output_data),
         })
     }
 

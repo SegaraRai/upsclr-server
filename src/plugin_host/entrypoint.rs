@@ -9,7 +9,7 @@ use tarpc::server::Channel;
 use tracing::{debug, info};
 
 pub async fn main(bootstrap_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    info!("Starting plugin host process");
+    info!("Starting plugin host process at PID {}", std::process::id());
     info!(
         "Connecting to main process via bootstrap: {}",
         bootstrap_name

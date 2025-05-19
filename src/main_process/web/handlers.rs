@@ -16,6 +16,7 @@ use axum::{
     response::Response,
 };
 use axum_extra::TypedHeader;
+use ipc_channel::ipc::IpcSharedMemory;
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -304,7 +305,7 @@ pub async fn upscale_image(
         channels: in_channels,
         input_color_format: in_color_format,
         desired_color_format: crate::models::ColorFormat::from(preferred_output_format),
-        input_data: in_data_vec,
+        input_data: IpcSharedMemory::from_bytes(&in_data_vec),
     };
 
     // Perform upscaling
