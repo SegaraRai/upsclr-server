@@ -37,7 +37,7 @@ headers = "0.4"
 tower-http = { version = "0.6", features = ["trace", "limit", "cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
-ipc-channel = { version = "0.19", features = ["async"] }
+ipc-channel = { git = "https://github.com/servo/ipc-channel.git", features = ["async"] }
 tarpc = { version = "0.36", features = ["tokio1", "serde-transport", "tcp"] }
 futures = "0.3"
 tokio-serde = { version = "0.9", features = ["json"] }
