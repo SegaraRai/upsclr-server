@@ -324,4 +324,35 @@ impl PluginHostService for PluginHostServiceImpl {
 
         result
     }
+
+    // Get information about a loaded plugin
+    async fn get_plugin_info(
+        self,
+        _: Context,
+        plugin_id: Uuid,
+    ) -> Result<PluginInfo, PluginHostError> {
+        debug!("Getting plugin info for plugin ID: {}", plugin_id);
+
+        // Get the loaded plugin
+        let plugin_guard = self.plugin.read().unwrap();
+        let plugin = plugin_guard.as_ref().ok_or_else(|| {
+            PluginHostError::PluginNotFound("No plugin loaded in this plugin host".to_string())
+        })?;
+
+        // Check if this is the correct plugin ID
+        if plugin.id != plugin_id {
+            return Err(PluginHostError::PluginNotFound(format!(
+                "Plugin ID mismatch. Expected: {}, but this host has: {}",
+                plugin_id, plugin.id
+            )));
+        }
+
+        // Clone the plugin info and update the engine instances list
+        let mut plugin_info = plugin.plugin_info.clone();
+        if let Some(instance_manager) = self.instance_manager.read().unwrap().as_ref() {
+            plugin_info.engine_instances = instance_manager.get_all_instances();
+        }
+
+        Ok(plugin_info)
+    }
 }

@@ -15,6 +15,17 @@ use tokio::sync::Mutex;
 use tracing::info;
 use uuid::Uuid;
 
+pub enum PluginHostRespawnMode {
+    /// Restart the plugin host process if it crashes
+    RestartOnCrash,
+    /// Do not restart the plugin host process
+    /// This is meant to be a temporary suspension, e.g. when plugin host crashes repeatedly
+    Suspended,
+    /// Do not restart the plugin host process
+    /// This is meant to be used when the application is shutting down
+    NoRestart,
+}
+
 // Represents a connection to a plugin host process
 pub struct PluginHostConnection {
     // Dispatcher
@@ -29,6 +40,8 @@ pub struct PluginHostConnection {
     plugin_path: PathBuf,
     // Whether the plugin has been loaded successfully
     plugin_loaded: bool,
+    // Latest plugin information with its engine instances
+    plugin_info: Arc<Mutex<Option<PluginInfo>>>,
 }
 
 impl PluginHostConnection {
@@ -74,6 +87,7 @@ impl PluginHostConnection {
             plugin_id,
             plugin_path,
             plugin_loaded: false,
+            plugin_info: Arc::new(Mutex::new(None)),
         };
 
         Ok(connection)
@@ -96,13 +110,15 @@ impl PluginHostConnection {
             .client
             .load_plugin(ctx, self.plugin_id, self.plugin_path.clone())
             .await
-            .map_err(|e| PluginHostError::PluginLoadError(format!("RPC error: {}", e)))?;
+            .map_err(|e| PluginHostError::PluginLoadError(format!("RPC error: {}", e)))??;
 
-        if result.is_ok() {
-            self.plugin_loaded = true;
-        }
+        self.plugin_loaded = true;
 
-        result
+        // Store the plugin info
+        let mut info_guard = self.plugin_info.lock().await;
+        *info_guard = Some(result.clone());
+
+        Ok(result)
     }
 
     // Get the process ID of the plugin host
@@ -185,10 +201,16 @@ impl PluginHostConnection {
         }
 
         let ctx = context::current();
-        self.client
+        let result = self
+            .client
             .create_engine_instance(ctx, config)
             .await
-            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))?
+            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))??;
+
+        // Update plugin info after mutation
+        self.update_plugin_info().await?;
+
+        Ok(result)
     }
 
     // Destroy an engine instance
@@ -203,7 +225,12 @@ impl PluginHostConnection {
         self.client
             .destroy_engine_instance(ctx, instance_id)
             .await
-            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))?
+            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))??;
+
+        // Update plugin info after mutation
+        self.update_plugin_info().await?;
+
+        Ok(())
     }
 
     // Recreate an engine instance
@@ -219,10 +246,16 @@ impl PluginHostConnection {
         }
 
         let ctx = context::current();
-        self.client
+        let result = self
+            .client
             .recreate_engine_instance(ctx, id, config)
             .await
-            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))?
+            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))??;
+
+        // Update plugin info after mutation
+        self.update_plugin_info().await?;
+
+        Ok(result)
     }
 
     // Preload an engine instance
@@ -257,5 +290,38 @@ impl PluginHostConnection {
             .upscale(ctx, id, params)
             .await
             .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))?
+    }
+
+    // Update plugin info from the plugin host
+    async fn update_plugin_info(&self) -> Result<(), PluginHostError> {
+        if !self.plugin_loaded {
+            return Ok(());
+        }
+
+        let ctx = context::current();
+        let plugin_info = self
+            .client
+            .get_plugin_info(ctx, self.plugin_id)
+            .await
+            .map_err(|e| PluginHostError::InternalError(format!("RPC error: {}", e)))??;
+
+        let mut info_guard = self.plugin_info.lock().await;
+        *info_guard = Some(plugin_info);
+
+        Ok(())
+    }
+
+    // Get the current plugin info
+    pub async fn get_plugin_info(&self) -> Result<Option<PluginInfo>, PluginHostError> {
+        if !self.plugin_loaded {
+            return Ok(None);
+        }
+
+        // Update from the plugin host to get the latest info
+        self.update_plugin_info().await?;
+
+        // Return the stored info
+        let info_guard = self.plugin_info.lock().await;
+        Ok(info_guard.clone())
     }
 }

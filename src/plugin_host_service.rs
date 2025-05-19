@@ -20,6 +20,9 @@ pub trait PluginHostService {
     /// Load plugin from the specified path and return its information or error
     async fn load_plugin(plugin_id: Uuid, path: PathBuf) -> Result<PluginInfo, PluginHostError>;
 
+    /// Get information about a loaded plugin
+    async fn get_plugin_info(plugin_id: Uuid) -> Result<PluginInfo, PluginHostError>;
+
     /// Validates the engine configuration for the specified engine
     async fn validate_engine_config(
         plugin_id: Uuid,
