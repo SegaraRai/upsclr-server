@@ -14,6 +14,8 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     routing::{delete, get, post},
+    middleware,
+    Extension,
 };
 use clap::Parser;
 use instance_manager::InstanceManager;
@@ -46,6 +48,21 @@ struct AppConfig {
     /// Directory containing plugin shared libraries.
     #[arg(long, env = "UPSCLR_SERVER_PLUGINS_DIR", default_value = "plugins")]
     plugins_dir: String,
+
+    /// Allowed Host header value for request validation (optional security feature).
+    /// If not specified, Host header validation is disabled.
+    #[arg(long, env = "UPSCLR_SERVER_ALLOWED_HOST")]
+    allowed_host: Option<String>,
+
+    /// Allowed Origin header value for request validation (optional security feature).
+    /// If not specified, Origin header validation is disabled.
+    #[arg(long, env = "UPSCLR_SERVER_ALLOWED_ORIGIN")]
+    allowed_origin: Option<String>,
+
+    /// Allowed Referer header value for request validation (optional security feature).
+    /// If not specified, Referer header validation is disabled.
+    #[arg(long, env = "UPSCLR_SERVER_ALLOWED_REFERER")]
+    allowed_referer: Option<String>,
 }
 
 #[tokio::main]
@@ -99,12 +116,37 @@ async fn main() {
     let instance_manager_arc = Arc::new(RwLock::new(InstanceManager::default()));
     tracing::info!("InstanceManager initialized.");
 
+    // --- Configure Request Source Validation ---
+    let request_source_config = handlers::RequestSourceConfig {
+        allowed_host: config.allowed_host.clone(),
+        allowed_origin: config.allowed_origin.clone(),
+        allowed_referer: config.allowed_referer.clone(),
+    };
+    
+    // Log the security configuration
+    if request_source_config.allowed_host.is_some() 
+        || request_source_config.allowed_origin.is_some() 
+        || request_source_config.allowed_referer.is_some() {
+        tracing::info!("Request source validation enabled with restrictions:");
+        if let Some(ref host) = request_source_config.allowed_host {
+            tracing::info!("  - Allowed Host: {}", host);
+        }
+        if let Some(ref origin) = request_source_config.allowed_origin {
+            tracing::info!("  - Allowed Origin: {}", origin);
+        }
+        if let Some(ref referer) = request_source_config.allowed_referer {
+            tracing::info!("  - Allowed Referer: {}", referer);
+        }
+    } else {
+        tracing::warn!("Request source validation is disabled - all requests will be allowed");
+    }
+
     // --- Build Axum Application Router ---
     // Define routes and associate them with their respective handler functions.
     // Also, apply middleware layers.
 
     // Create a router with combined state for handlers needing both managers
-    let app = Router::new()
+    let mut app = Router::new()
         // Plugin and Engine discovery (only needs PluginManager)
         .route("/plugins", get(handlers::get_plugins))
         // Instance management endpoints
@@ -125,10 +167,35 @@ async fn main() {
         // Reset endpoint
         .route("/reset", post(handlers::reset))
         // Apply a layer to limit the maximum size of request bodies (e.g., for image uploads).
-        .layer(DefaultBodyLimit::max(handlers::MAX_IMAGE_SIZE_BYTES))
-        // Add CORS layer for broader client compatibility (e.g., web frontends from different origins).
-        // Configure this layer according to your security requirements.
-        .layer(CorsLayer::permissive()) // Example: allows all origins. Restrict in production.
+        .layer(DefaultBodyLimit::max(handlers::MAX_IMAGE_SIZE_BYTES));
+
+    // Apply request source validation middleware if any restrictions are configured
+    if request_source_config.allowed_host.is_some() 
+        || request_source_config.allowed_origin.is_some() 
+        || request_source_config.allowed_referer.is_some() {
+        app = app.layer(middleware::from_fn(handlers::validate_request_source))
+               .layer(Extension(request_source_config.clone()));
+    }
+    
+    // Configure CORS based on whether source validation is enabled
+    let cors_layer = if let Some(ref allowed_origin) = request_source_config.allowed_origin {
+        // If origin validation is enabled, use more restrictive CORS
+        if let Ok(origin_header) = allowed_origin.parse::<axum::http::HeaderValue>() {
+            CorsLayer::new()
+                .allow_origin(origin_header)
+                .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::DELETE])
+                .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::ACCEPT])
+        } else {
+            tracing::warn!("Invalid origin format '{}', falling back to permissive CORS", allowed_origin);
+            CorsLayer::permissive()
+        }
+    } else {
+        // Use permissive CORS if no origin validation
+        CorsLayer::permissive()
+    };
+    
+    let app = app
+        .layer(cors_layer)
         // Add a TraceLayer for logging HTTP request and response details.
         .layer(
             TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::new().level(Level::INFO)), // Log at INFO level

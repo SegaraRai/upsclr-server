@@ -25,6 +25,78 @@ pub type SharedInstanceManager = Arc<RwLock<InstanceManager>>;
 
 pub const MAX_IMAGE_SIZE_BYTES: usize = 100 * 1024 * 1024; // Example: 100MB limit for input image.
 
+// --- Request Source Validation Middleware ---
+
+/// Configuration for request source validation
+#[derive(Debug, Clone)]
+pub struct RequestSourceConfig {
+    pub allowed_host: Option<String>,
+    pub allowed_origin: Option<String>,
+    pub allowed_referer: Option<String>,
+}
+
+/// Middleware to validate request source headers (Host, Origin, Referer)
+pub async fn validate_request_source(
+    config: axum::Extension<RequestSourceConfig>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<Response, AppError> {
+    let headers = request.headers();
+    
+    // Validate Host header if configured
+    if let Some(ref allowed_host) = config.allowed_host {
+        if let Some(host_header) = headers.get(axum::http::header::HOST) {
+            let host_value = host_header.to_str().map_err(|_| {
+                AppError::Forbidden("Invalid Host header format".to_string())
+            })?;
+            if host_value != allowed_host {
+                return Err(AppError::Forbidden(format!(
+                    "Invalid Host header: expected '{}', got '{}'",
+                    allowed_host, host_value
+                )));
+            }
+        } else {
+            return Err(AppError::Forbidden("Missing required Host header".to_string()));
+        }
+    }
+    
+    // Validate Origin header if configured
+    if let Some(ref allowed_origin) = config.allowed_origin {
+        if let Some(origin_header) = headers.get(axum::http::header::ORIGIN) {
+            let origin_value = origin_header.to_str().map_err(|_| {
+                AppError::Forbidden("Invalid Origin header format".to_string())
+            })?;
+            if origin_value != allowed_origin {
+                return Err(AppError::Forbidden(format!(
+                    "Invalid Origin header: expected '{}', got '{}'",
+                    allowed_origin, origin_value
+                )));
+            }
+        } else {
+            return Err(AppError::Forbidden("Missing required Origin header".to_string()));
+        }
+    }
+    
+    // Validate Referer header if configured
+    if let Some(ref allowed_referer) = config.allowed_referer {
+        if let Some(referer_header) = headers.get(axum::http::header::REFERER) {
+            let referer_value = referer_header.to_str().map_err(|_| {
+                AppError::Forbidden("Invalid Referer header format".to_string())
+            })?;
+            if referer_value != allowed_referer {
+                return Err(AppError::Forbidden(format!(
+                    "Invalid Referer header: expected '{}', got '{}'",
+                    allowed_referer, referer_value
+                )));
+            }
+        } else {
+            return Err(AppError::Forbidden("Missing required Referer header".to_string()));
+        }
+    }
+    
+    Ok(next.run(request).await)
+}
+
 // OutputFormat enum for handling different image output formats
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum OutputFormat {
