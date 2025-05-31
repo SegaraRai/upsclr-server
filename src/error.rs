@@ -25,6 +25,7 @@ pub enum AppError {
 
     // Errors related to request processing
     BadRequest(String), // General bad request (e.g., invalid parameters)
+    Forbidden(String),  // Request forbidden due to invalid source headers
     MultipartError(axum::extract::multipart::MultipartError),
     UnsupportedMediaType(String), // Unsupported media type (e.g., Content-Type)
     NotAcceptable(String),        // Unsupported Accept header
@@ -71,6 +72,7 @@ impl IntoResponse for AppError {
                 "PLUGIN_OPERATION_FAILED",
             ),
             AppError::BadRequest(s) => (StatusCode::BAD_REQUEST, s, "BAD_REQUEST"),
+            AppError::Forbidden(s) => (StatusCode::FORBIDDEN, s, "FORBIDDEN"),
             AppError::MultipartError(e) => (
                 StatusCode::BAD_REQUEST,
                 format!("Invalid multipart request: {}", e),
