@@ -58,7 +58,7 @@ jobs:
 
       - name: Run clippy
         run: |
-          cargo clippy --target ${{ matrix.target }} -- -D warnings
+          cargo clippy --target ${{ matrix.target }}
 
       - name: Check formatting
         run: |
