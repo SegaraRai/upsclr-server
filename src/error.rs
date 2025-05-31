@@ -3,9 +3,9 @@
 // conversion into HTTP responses.
 
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde_json::json; // For creating JSON error bodies
 
@@ -176,10 +176,12 @@ mod tests {
 
         let body = extract_error_body(response).await;
         assert_eq!(body["error"]["code"], "PLUGIN_NOT_FOUND");
-        assert!(body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("test_plugin"));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("test_plugin")
+        );
     }
 
     #[tokio::test]
@@ -221,14 +223,18 @@ mod tests {
 
         let body = extract_error_body(response).await;
         assert_eq!(body["error"]["code"], "PLUGIN_OPERATION_FAILED");
-        assert!(body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("upscale"));
-        assert!(body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("Out of memory"));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("upscale")
+        );
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Out of memory")
+        );
     }
 
     #[tokio::test]
@@ -240,10 +246,12 @@ mod tests {
 
         let body = extract_error_body(response).await;
         assert_eq!(body["error"]["code"], "UNSUPPORTED_MEDIA_TYPE");
-        assert!(body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("image/bmp"));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("image/bmp")
+        );
     }
 
     #[test]

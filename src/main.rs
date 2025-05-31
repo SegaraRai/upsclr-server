@@ -11,9 +11,9 @@ mod plugin_ffi;
 mod plugin_manager;
 
 use axum::{
+    Router,
     extract::DefaultBodyLimit,
     routing::{delete, get, post},
-    Router,
 };
 use clap::Parser;
 use instance_manager::InstanceManager;
