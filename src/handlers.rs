@@ -41,24 +41,27 @@ pub async fn validate_request_security(
     next: axum::middleware::Next,
 ) -> Result<Response, AppError> {
     let headers = request.headers();
-    
+
     // Validate User-Agent header if configured
     if config.require_user_agent_prefix {
         if let Some(user_agent_header) = headers.get(axum::http::header::USER_AGENT) {
-            let user_agent_value = user_agent_header.to_str().map_err(|_| {
-                AppError::Forbidden("Invalid User-Agent header format".to_string())
-            })?;
-            if !user_agent_value.starts_with("Upsclr/") && !user_agent_value.starts_with("Upsclr-") {
+            let user_agent_value = user_agent_header
+                .to_str()
+                .map_err(|_| AppError::Forbidden("Invalid User-Agent header format".to_string()))?;
+            if !user_agent_value.starts_with("Upsclr/") && !user_agent_value.starts_with("Upsclr-")
+            {
                 return Err(AppError::Forbidden(format!(
                     "Invalid User-Agent header: expected to start with 'Upsclr/' or 'Upsclr-', got '{}'",
                     user_agent_value
                 )));
             }
         } else {
-            return Err(AppError::Forbidden("Missing required User-Agent header".to_string()));
+            return Err(AppError::Forbidden(
+                "Missing required User-Agent header".to_string(),
+            ));
         }
     }
-    
+
     // Validate Upsclr-Request header if configured
     if config.require_upsclr_request_header {
         if let Some(upsclr_request_header) = headers.get("Upsclr-Request") {
@@ -66,13 +69,17 @@ pub async fn validate_request_security(
                 AppError::Forbidden("Invalid Upsclr-Request header format".to_string())
             })?;
             if upsclr_request_value.is_empty() {
-                return Err(AppError::Forbidden("Upsclr-Request header must not be empty".to_string()));
+                return Err(AppError::Forbidden(
+                    "Upsclr-Request header must not be empty".to_string(),
+                ));
             }
         } else {
-            return Err(AppError::Forbidden("Missing required Upsclr-Request header".to_string()));
+            return Err(AppError::Forbidden(
+                "Missing required Upsclr-Request header".to_string(),
+            ));
         }
     }
-    
+
     Ok(next.run(request).await)
 }
 
@@ -953,14 +960,14 @@ pub async fn reset(
 mod tests {
     use super::*;
     use axum::{
-        middleware,
-        http::{Request, Method, HeaderName, HeaderValue},
-        body::Body,
-        response::Response,
         Extension,
+        body::Body,
+        http::{HeaderName, HeaderValue, Method, Request},
+        middleware,
+        response::Response,
     };
-    use tower::{ServiceExt, ServiceBuilder};
     use http_body_util::BodyExt;
+    use tower::{ServiceBuilder, ServiceExt};
 
     // Helper function to create a test request with specific headers
     fn create_test_request(headers: Vec<(HeaderName, HeaderValue)>) -> Request<Body> {
@@ -969,24 +976,29 @@ mod tests {
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        
+
         for (name, value) in headers {
             request.headers_mut().insert(name, value);
         }
-        
+
         request
     }
 
     // Helper function to create a simple test service
-    async fn test_service(_request: Request<Body>) -> Result<Response<Body>, std::convert::Infallible> {
-        Ok(Response::builder()
-            .status(200)
-            .body(Body::empty())
-            .unwrap())
+    async fn test_service(
+        _request: Request<Body>,
+    ) -> Result<Response<Body>, std::convert::Infallible> {
+        Ok(Response::builder().status(200).body(Body::empty()).unwrap())
     }
 
     // Helper function to create a service with validation middleware
-    fn create_test_service_with_validation(config: SecurityConfig) -> impl tower::Service<Request<Body>, Response = Response<Body>, Error = std::convert::Infallible> + Clone {
+    fn create_test_service_with_validation(
+        config: SecurityConfig,
+    ) -> impl tower::Service<
+        Request<Body>,
+        Response = Response<Body>,
+        Error = std::convert::Infallible,
+    > + Clone {
         ServiceBuilder::new()
             .layer(Extension(config))
             .layer(middleware::from_fn(validate_request_security))
@@ -1015,10 +1027,11 @@ mod tests {
         };
 
         let service = create_test_service_with_validation(config);
-        let request = create_test_request(vec![
-            (axum::http::header::USER_AGENT, HeaderValue::from_static("Upsclr/1.0"))
-        ]);
-        
+        let request = create_test_request(vec![(
+            axum::http::header::USER_AGENT,
+            HeaderValue::from_static("Upsclr/1.0"),
+        )]);
+
         let response = service.oneshot(request).await.unwrap();
         assert_eq!(response.status(), 200);
     }
@@ -1031,10 +1044,11 @@ mod tests {
         };
 
         let service = create_test_service_with_validation(config);
-        let request = create_test_request(vec![
-            (axum::http::header::USER_AGENT, HeaderValue::from_static("Upsclr-client/2.1"))
-        ]);
-        
+        let request = create_test_request(vec![(
+            axum::http::header::USER_AGENT,
+            HeaderValue::from_static("Upsclr-client/2.1"),
+        )]);
+
         let response = service.oneshot(request).await.unwrap();
         assert_eq!(response.status(), 200);
     }
@@ -1047,13 +1061,14 @@ mod tests {
         };
 
         let service = create_test_service_with_validation(config);
-        let request = create_test_request(vec![
-            (axum::http::header::USER_AGENT, HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"))
-        ]);
-        
+        let request = create_test_request(vec![(
+            axum::http::header::USER_AGENT,
+            HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"),
+        )]);
+
         let response = service.oneshot(request).await.unwrap();
         assert_eq!(response.status(), 403);
-        
+
         // Check the response body contains the error message
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
@@ -1073,7 +1088,7 @@ mod tests {
         let request = create_test_request(vec![]);
         let response = service.oneshot(request).await.unwrap();
         assert_eq!(response.status(), 403);
-        
+
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(body_str.contains("Missing required User-Agent header"));
@@ -1087,10 +1102,11 @@ mod tests {
         };
 
         let service = create_test_service_with_validation(config);
-        let request = create_test_request(vec![
-            (HeaderName::from_static("upsclr-request"), HeaderValue::from_static("true"))
-        ]);
-        
+        let request = create_test_request(vec![(
+            HeaderName::from_static("upsclr-request"),
+            HeaderValue::from_static("true"),
+        )]);
+
         let response = service.oneshot(request).await.unwrap();
         assert_eq!(response.status(), 200);
     }
@@ -1103,13 +1119,14 @@ mod tests {
         };
 
         let service = create_test_service_with_validation(config);
-        let request = create_test_request(vec![
-            (HeaderName::from_static("upsclr-request"), HeaderValue::from_static(""))
-        ]);
-        
+        let request = create_test_request(vec![(
+            HeaderName::from_static("upsclr-request"),
+            HeaderValue::from_static(""),
+        )]);
+
         let response = service.oneshot(request).await.unwrap();
         assert_eq!(response.status(), 403);
-        
+
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(body_str.contains("Upsclr-Request header must not be empty"));
@@ -1126,7 +1143,7 @@ mod tests {
         let request = create_test_request(vec![]);
         let response = service.oneshot(request).await.unwrap();
         assert_eq!(response.status(), 403);
-        
+
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(body_str.contains("Missing required Upsclr-Request header"));
@@ -1141,10 +1158,16 @@ mod tests {
 
         let service = create_test_service_with_validation(config);
         let request = create_test_request(vec![
-            (axum::http::header::USER_AGENT, HeaderValue::from_static("Upsclr/1.0")),
-            (HeaderName::from_static("upsclr-request"), HeaderValue::from_static("upscale")),
+            (
+                axum::http::header::USER_AGENT,
+                HeaderValue::from_static("Upsclr/1.0"),
+            ),
+            (
+                HeaderName::from_static("upsclr-request"),
+                HeaderValue::from_static("upscale"),
+            ),
         ]);
-        
+
         let response = service.oneshot(request).await.unwrap();
         assert_eq!(response.status(), 200);
     }
@@ -1158,13 +1181,19 @@ mod tests {
 
         let service = create_test_service_with_validation(config);
         let request = create_test_request(vec![
-            (axum::http::header::USER_AGENT, HeaderValue::from_static("BadClient/1.0")),
-            (HeaderName::from_static("upsclr-request"), HeaderValue::from_static("upscale")),
+            (
+                axum::http::header::USER_AGENT,
+                HeaderValue::from_static("BadClient/1.0"),
+            ),
+            (
+                HeaderName::from_static("upsclr-request"),
+                HeaderValue::from_static("upscale"),
+            ),
         ]);
-        
+
         let response = service.oneshot(request).await.unwrap();
         assert_eq!(response.status(), 403);
-        
+
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(body_str.contains("Invalid User-Agent header"));
@@ -1179,13 +1208,19 @@ mod tests {
 
         let service = create_test_service_with_validation(config);
         let request = create_test_request(vec![
-            (axum::http::header::USER_AGENT, HeaderValue::from_static("Upsclr/1.0")),
-            (HeaderName::from_static("upsclr-request"), HeaderValue::from_static("")),
+            (
+                axum::http::header::USER_AGENT,
+                HeaderValue::from_static("Upsclr/1.0"),
+            ),
+            (
+                HeaderName::from_static("upsclr-request"),
+                HeaderValue::from_static(""),
+            ),
         ]);
-        
+
         let response = service.oneshot(request).await.unwrap();
         assert_eq!(response.status(), 403);
-        
+
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(body_str.contains("Upsclr-Request header must not be empty"));
@@ -1200,13 +1235,14 @@ mod tests {
         };
 
         let service = create_test_service_with_validation(config);
-        let request = create_test_request(vec![
-            (axum::http::header::USER_AGENT, HeaderValue::from_static("upsclr/1.0"))
-        ]);
-        
+        let request = create_test_request(vec![(
+            axum::http::header::USER_AGENT,
+            HeaderValue::from_static("upsclr/1.0"),
+        )]);
+
         let response = service.oneshot(request).await.unwrap();
         assert_eq!(response.status(), 403);
-        
+
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(body_str.contains("Invalid User-Agent header"));
@@ -1226,16 +1262,16 @@ mod tests {
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        
+
         // Insert invalid UTF-8 bytes into the User-Agent header
         request.headers_mut().insert(
             axum::http::header::USER_AGENT,
-            HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap()
+            HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap(),
         );
-        
+
         let response = service.oneshot(request).await.unwrap();
         assert_eq!(response.status(), 403);
-        
+
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(body_str.contains("Invalid User-Agent header format"));
@@ -1255,16 +1291,16 @@ mod tests {
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        
+
         // Insert invalid UTF-8 bytes into the Upsclr-Request header
         request.headers_mut().insert(
             HeaderName::from_static("upsclr-request"),
-            HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap()
+            HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap(),
         );
-        
+
         let response = service.oneshot(request).await.unwrap();
         assert_eq!(response.status(), 403);
-        
+
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(body_str.contains("Invalid Upsclr-Request header format"));
@@ -1277,11 +1313,17 @@ mod tests {
             require_user_agent_prefix: true,
             require_upsclr_request_header: false,
         };
-        
+
         let config_clone = config.clone();
-        
-        assert_eq!(config.require_user_agent_prefix, config_clone.require_user_agent_prefix);
-        assert_eq!(config.require_upsclr_request_header, config_clone.require_upsclr_request_header);
+
+        assert_eq!(
+            config.require_user_agent_prefix,
+            config_clone.require_user_agent_prefix
+        );
+        assert_eq!(
+            config.require_upsclr_request_header,
+            config_clone.require_upsclr_request_header
+        );
     }
 
     #[tokio::test]
@@ -1291,7 +1333,7 @@ mod tests {
             require_user_agent_prefix: true,
             require_upsclr_request_header: true,
         };
-        
+
         let debug_str = format!("{:?}", config);
         assert!(debug_str.contains("require_user_agent_prefix: true"));
         assert!(debug_str.contains("require_upsclr_request_header: true"));
