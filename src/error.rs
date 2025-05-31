@@ -153,3 +153,141 @@ impl<T> From<std::sync::PoisonError<T>> for AppError {
         AppError::InternalServerError(format!("Mutex lock poisoned: {}", err))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{http::StatusCode, response::Response};
+    use serde_json::Value;
+
+    async fn extract_error_body(response: Response) -> Value {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_plugin_not_found_error_response() {
+        let error = AppError::PluginNotFound("test_plugin".to_string());
+        let response = error.into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = extract_error_body(response).await;
+        assert_eq!(body["error"]["code"], "PLUGIN_NOT_FOUND");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("test_plugin")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_instance_not_found_error_response() {
+        let error = AppError::InstanceNotFound;
+        let response = error.into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let body = extract_error_body(response).await;
+        assert_eq!(body["error"]["code"], "INSTANCE_NOT_FOUND");
+        assert_eq!(
+            body["error"]["message"],
+            "The requested engine instance was not found."
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bad_request_error_response() {
+        let error = AppError::BadRequest("Invalid parameter".to_string());
+        let response = error.into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = extract_error_body(response).await;
+        assert_eq!(body["error"]["code"], "BAD_REQUEST");
+        assert_eq!(body["error"]["message"], "Invalid parameter");
+    }
+
+    #[tokio::test]
+    async fn test_plugin_operation_failed_error_response() {
+        let error = AppError::PluginOperationFailed {
+            operation: "upscale".to_string(),
+            details: "Out of memory".to_string(),
+        };
+        let response = error.into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = extract_error_body(response).await;
+        assert_eq!(body["error"]["code"], "PLUGIN_OPERATION_FAILED");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("upscale")
+        );
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Out of memory")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_media_type_error_response() {
+        let error = AppError::UnsupportedMediaType("image/bmp".to_string());
+        let response = error.into_response();
+
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        let body = extract_error_body(response).await;
+        assert_eq!(body["error"]["code"], "UNSUPPORTED_MEDIA_TYPE");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("image/bmp")
+        );
+    }
+
+    #[test]
+    fn test_from_io_error() {
+        let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "File not found");
+        let app_error: AppError = io_error.into();
+
+        match app_error {
+            AppError::IoError(_) => (),
+            _ => panic!("Expected IoError variant"),
+        }
+    }
+
+    #[test]
+    fn test_from_cstring_error() {
+        let cstring_error = std::ffi::CString::new("test\0with\0nulls").unwrap_err();
+        let app_error: AppError = cstring_error.into();
+
+        match app_error {
+            AppError::CStringError(_) => (),
+            _ => panic!("Expected CStringError variant"),
+        }
+    }
+
+    #[test]
+    fn test_from_image_error() {
+        let image_error =
+            image::ImageError::Unsupported(image::error::UnsupportedError::from_format_and_kind(
+                image::error::ImageFormatHint::Unknown,
+                image::error::UnsupportedErrorKind::Format(image::error::ImageFormatHint::Unknown),
+            ));
+        let app_error: AppError = image_error.into();
+
+        match app_error {
+            AppError::ImageProcessingError(_) => (),
+            _ => panic!("Expected ImageProcessingError variant"),
+        }
+    }
+}

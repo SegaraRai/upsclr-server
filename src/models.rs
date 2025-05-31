@@ -104,3 +104,152 @@ pub struct InstanceInfoForList {
     pub engine_name: String,
     // Potentially include more details like creation time or basic config summary if needed.
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json;
+
+    #[test]
+    fn test_create_instance_request_deserialization() {
+        let json = r#"{
+            "plugin_id": "test_plugin",
+            "engine_name": "test_engine",
+            "config": {"param1": "value1", "param2": 42}
+        }"#;
+
+        let request: CreateInstanceRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.plugin_id, "test_plugin");
+        assert_eq!(request.engine_name, "test_engine");
+        assert_eq!(request.config["param1"], "value1");
+        assert_eq!(request.config["param2"], 42);
+    }
+
+    #[test]
+    fn test_create_instance_response_serialization() {
+        let uuid = Uuid::new_v4();
+        let validation = ValidationResultDesc {
+            is_valid: true,
+            error_count: 0,
+            error_messages: vec![],
+            warning_count: 1,
+            warning_messages: vec!["Test warning".to_string()],
+        };
+
+        let response = CreateInstanceResponse {
+            instance_id: Some(uuid),
+            validation: Some(validation),
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains(&uuid.to_string()));
+        assert!(json.contains("Test warning"));
+        assert!(json.contains("\"is_valid\":true"));
+    }
+
+    #[test]
+    fn test_validation_result_desc_serialization() {
+        let validation = ValidationResultDesc {
+            is_valid: false,
+            error_count: 2,
+            error_messages: vec!["Error 1".to_string(), "Error 2".to_string()],
+            warning_count: 0,
+            warning_messages: vec![],
+        };
+
+        let json = serde_json::to_string(&validation).unwrap();
+        let parsed: ValidationResultDesc = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.is_valid, false);
+        assert_eq!(parsed.error_count, 2);
+        assert_eq!(parsed.error_messages.len(), 2);
+        assert_eq!(parsed.error_messages[0], "Error 1");
+        assert_eq!(parsed.warning_count, 0);
+    }
+
+    #[test]
+    fn test_scale_query_param_deserialization() {
+        let json = r#"{"scale": 4}"#;
+        let param: ScaleQueryParam = serde_json::from_str(json).unwrap();
+        assert_eq!(param.scale, 4);
+    }
+
+    #[test]
+    fn test_deserialize_bool_from_int_optional_query() {
+        // Test true values
+        assert_eq!(
+            deserialize_bool_from_int_optional_query(&mut serde_json::Deserializer::from_str(
+                "\"1\""
+            ))
+            .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            deserialize_bool_from_int_optional_query(&mut serde_json::Deserializer::from_str(
+                "\"true\""
+            ))
+            .unwrap(),
+            Some(true)
+        );
+
+        // Test false values
+        assert_eq!(
+            deserialize_bool_from_int_optional_query(&mut serde_json::Deserializer::from_str(
+                "\"0\""
+            ))
+            .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            deserialize_bool_from_int_optional_query(&mut serde_json::Deserializer::from_str(
+                "\"false\""
+            ))
+            .unwrap(),
+            Some(false)
+        );
+
+        // Test null
+        assert_eq!(
+            deserialize_bool_from_int_optional_query(&mut serde_json::Deserializer::from_str(
+                "null"
+            ))
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_create_instance_query_dry_run_parsing() {
+        // Test dry_run=true
+        let json = r#"{"dry_run": "1"}"#;
+        let query: CreateInstanceQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(query.dry_run, Some(true));
+
+        // Test dry_run=false
+        let json = r#"{"dry_run": "0"}"#;
+        let query: CreateInstanceQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(query.dry_run, Some(false));
+
+        // Test no dry_run
+        let json = r#"{}"#;
+        let query: CreateInstanceQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(query.dry_run, None);
+    }
+
+    #[test]
+    fn test_instance_info_for_list_serialization() {
+        let uuid = Uuid::new_v4();
+        let info = InstanceInfoForList {
+            instance_id: uuid,
+            plugin_id: "test_plugin".to_string(),
+            plugin_name: "Test Plugin".to_string(),
+            engine_name: "Test Engine".to_string(),
+        };
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains(&uuid.to_string()));
+        assert!(json.contains("test_plugin"));
+        assert!(json.contains("Test Plugin"));
+        assert!(json.contains("Test Engine"));
+    }
+}
