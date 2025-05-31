@@ -969,3 +969,307 @@ pub async fn reset(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        middleware,
+        http::{Request, Method, HeaderName, HeaderValue},
+        body::Body,
+        response::Response,
+        Extension,
+    };
+    use tower::{ServiceExt, ServiceBuilder};
+    use http_body_util::BodyExt;
+
+    // Helper function to create a test request with specific headers
+    fn create_test_request(headers: Vec<(HeaderName, HeaderValue)>) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        
+        for (name, value) in headers {
+            request.headers_mut().insert(name, value);
+        }
+        
+        request
+    }
+
+    // Helper function to create a simple test service
+    async fn test_service(_request: Request<Body>) -> Result<Response<Body>, std::convert::Infallible> {
+        Ok(Response::builder()
+            .status(200)
+            .body(Body::empty())
+            .unwrap())
+    }
+
+    // Helper function to create a service with validation middleware
+    fn create_test_service_with_validation(config: RequestSourceConfig) -> impl tower::Service<Request<Body>, Response = Response<Body>, Error = std::convert::Infallible> + Clone {
+        ServiceBuilder::new()
+            .layer(Extension(config))
+            .layer(middleware::from_fn(validate_request_source))
+            .service_fn(test_service)
+    }
+
+    #[tokio::test]
+    async fn test_no_validation_configured() {
+        // When no validation is configured, all requests should pass
+        let config = RequestSourceConfig {
+            allowed_host: None,
+            allowed_origin: None,
+            allowed_referer: None,
+        };
+
+        let service = create_test_service_with_validation(config);
+        let request = create_test_request(vec![]);
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_host_validation_success() {
+        let config = RequestSourceConfig {
+            allowed_host: Some("localhost:6795".to_string()),
+            allowed_origin: None,
+            allowed_referer: None,
+        };
+
+        let service = create_test_service_with_validation(config);
+        let request = create_test_request(vec![
+            (axum::http::header::HOST, HeaderValue::from_static("localhost:6795"))
+        ]);
+        
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_host_validation_failure() {
+        let config = RequestSourceConfig {
+            allowed_host: Some("localhost:6795".to_string()),
+            allowed_origin: None,
+            allowed_referer: None,
+        };
+
+        let service = create_test_service_with_validation(config);
+        let request = create_test_request(vec![
+            (axum::http::header::HOST, HeaderValue::from_static("evil.com"))
+        ]);
+        
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 403);
+        
+        // Check the response body contains the error message
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("Invalid Host header"));
+        assert!(body_str.contains("localhost:6795"));
+        assert!(body_str.contains("evil.com"));
+    }
+
+    #[tokio::test]
+    async fn test_host_validation_missing_header() {
+        let config = RequestSourceConfig {
+            allowed_host: Some("localhost:6795".to_string()),
+            allowed_origin: None,
+            allowed_referer: None,
+        };
+
+        let service = create_test_service_with_validation(config);
+        let request = create_test_request(vec![]);
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 403);
+        
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("Missing required Host header"));
+    }
+
+    #[tokio::test]
+    async fn test_origin_validation_success() {
+        let config = RequestSourceConfig {
+            allowed_host: None,
+            allowed_origin: Some("https://myapp.com".to_string()),
+            allowed_referer: None,
+        };
+
+        let service = create_test_service_with_validation(config);
+        let request = create_test_request(vec![
+            (axum::http::header::ORIGIN, HeaderValue::from_static("https://myapp.com"))
+        ]);
+        
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_origin_validation_failure() {
+        let config = RequestSourceConfig {
+            allowed_host: None,
+            allowed_origin: Some("https://myapp.com".to_string()),
+            allowed_referer: None,
+        };
+
+        let service = create_test_service_with_validation(config);
+        let request = create_test_request(vec![
+            (axum::http::header::ORIGIN, HeaderValue::from_static("https://evil.com"))
+        ]);
+        
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 403);
+        
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("Invalid Origin header"));
+        assert!(body_str.contains("https://myapp.com"));
+        assert!(body_str.contains("https://evil.com"));
+    }
+
+    #[tokio::test]
+    async fn test_referer_validation_success() {
+        let config = RequestSourceConfig {
+            allowed_host: None,
+            allowed_origin: None,
+            allowed_referer: Some("https://myapp.com/upscaler".to_string()),
+        };
+
+        let service = create_test_service_with_validation(config);
+        let request = create_test_request(vec![
+            (axum::http::header::REFERER, HeaderValue::from_static("https://myapp.com/upscaler"))
+        ]);
+        
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_referer_validation_failure() {
+        let config = RequestSourceConfig {
+            allowed_host: None,
+            allowed_origin: None,
+            allowed_referer: Some("https://myapp.com/upscaler".to_string()),
+        };
+
+        let service = create_test_service_with_validation(config);
+        let request = create_test_request(vec![
+            (axum::http::header::REFERER, HeaderValue::from_static("https://evil.com/malicious"))
+        ]);
+        
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 403);
+        
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("Invalid Referer header"));
+        assert!(body_str.contains("https://myapp.com/upscaler"));
+        assert!(body_str.contains("https://evil.com/malicious"));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_headers_validation_success() {
+        let config = RequestSourceConfig {
+            allowed_host: Some("localhost:6795".to_string()),
+            allowed_origin: Some("https://myapp.com".to_string()),
+            allowed_referer: Some("https://myapp.com/upscaler".to_string()),
+        };
+
+        let service = create_test_service_with_validation(config);
+        let request = create_test_request(vec![
+            (axum::http::header::HOST, HeaderValue::from_static("localhost:6795")),
+            (axum::http::header::ORIGIN, HeaderValue::from_static("https://myapp.com")),
+            (axum::http::header::REFERER, HeaderValue::from_static("https://myapp.com/upscaler")),
+        ]);
+        
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_headers_validation_partial_failure() {
+        // Test that if one header fails validation, the entire request is rejected
+        let config = RequestSourceConfig {
+            allowed_host: Some("localhost:6795".to_string()),
+            allowed_origin: Some("https://myapp.com".to_string()),
+            allowed_referer: Some("https://myapp.com/upscaler".to_string()),
+        };
+
+        let service = create_test_service_with_validation(config);
+        // Valid host and origin, but invalid referer
+        let request = create_test_request(vec![
+            (axum::http::header::HOST, HeaderValue::from_static("localhost:6795")),
+            (axum::http::header::ORIGIN, HeaderValue::from_static("https://myapp.com")),
+            (axum::http::header::REFERER, HeaderValue::from_static("https://evil.com/malicious")),
+        ]);
+        
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 403);
+        
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("Invalid Referer header"));
+    }
+
+    #[tokio::test]
+    async fn test_invalid_header_format() {
+        let config = RequestSourceConfig {
+            allowed_host: Some("localhost:6795".to_string()),
+            allowed_origin: None,
+            allowed_referer: None,
+        };
+
+        let service = create_test_service_with_validation(config);
+        // Create a request with invalid UTF-8 in the Host header
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        
+        // Insert invalid UTF-8 bytes into the Host header
+        request.headers_mut().insert(
+            axum::http::header::HOST,
+            HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap()
+        );
+        
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 403);
+        
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("Invalid Host header format"));
+    }
+
+    #[tokio::test]
+    async fn test_request_source_config_clone() {
+        // Test that the config can be cloned correctly
+        let config = RequestSourceConfig {
+            allowed_host: Some("localhost:6795".to_string()),
+            allowed_origin: Some("https://myapp.com".to_string()),
+            allowed_referer: Some("https://myapp.com/upscaler".to_string()),
+        };
+        
+        let config_clone = config.clone();
+        
+        assert_eq!(config.allowed_host, config_clone.allowed_host);
+        assert_eq!(config.allowed_origin, config_clone.allowed_origin);
+        assert_eq!(config.allowed_referer, config_clone.allowed_referer);
+    }
+
+    #[tokio::test]
+    async fn test_config_debug_format() {
+        // Test that the config can be debug formatted (for logging)
+        let config = RequestSourceConfig {
+            allowed_host: Some("localhost:6795".to_string()),
+            allowed_origin: Some("https://myapp.com".to_string()),
+            allowed_referer: Some("https://myapp.com/upscaler".to_string()),
+        };
+        
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("localhost:6795"));
+        assert!(debug_str.contains("https://myapp.com"));
+        assert!(debug_str.contains("https://myapp.com/upscaler"));
+    }
+}
