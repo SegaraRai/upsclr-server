@@ -11,11 +11,10 @@ mod plugin_ffi;
 mod plugin_manager;
 
 use axum::{
-    Router,
+    Extension, Router,
     extract::DefaultBodyLimit,
-    routing::{delete, get, post},
     middleware,
-    Extension,
+    routing::{delete, get, post},
 };
 use clap::Parser;
 use instance_manager::InstanceManager;
@@ -115,7 +114,7 @@ async fn main() {
         require_user_agent_prefix: !config.allow_any_user_agent,
         require_upsclr_request_header: !config.allow_missing_upsclr_request,
     };
-    
+
     // Log the security configuration
     if security_config.require_user_agent_prefix || security_config.require_upsclr_request_header {
         tracing::info!("Request security validation enabled:");
@@ -159,10 +158,11 @@ async fn main() {
 
     // Apply security validation middleware if any restrictions are configured
     if security_config.require_user_agent_prefix || security_config.require_upsclr_request_header {
-        app = app.layer(middleware::from_fn(handlers::validate_request_security))
-               .layer(Extension(security_config));
+        app = app
+            .layer(middleware::from_fn(handlers::validate_request_security))
+            .layer(Extension(security_config));
     }
-    
+
     let app = app
         // Add a TraceLayer for logging HTTP request and response details.
         .layer(
