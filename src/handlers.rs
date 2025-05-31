@@ -25,72 +25,51 @@ pub type SharedInstanceManager = Arc<RwLock<InstanceManager>>;
 
 pub const MAX_IMAGE_SIZE_BYTES: usize = 100 * 1024 * 1024; // Example: 100MB limit for input image.
 
-// --- Request Source Validation Middleware ---
+// --- Security Validation Middleware ---
 
-/// Configuration for request source validation
+/// Configuration for request security validation
 #[derive(Debug, Clone)]
-pub struct RequestSourceConfig {
-    pub allowed_host: Option<String>,
-    pub allowed_origin: Option<String>,
-    pub allowed_referer: Option<String>,
+pub struct SecurityConfig {
+    pub require_user_agent_prefix: bool,
+    pub require_upsclr_request_header: bool,
 }
 
-/// Middleware to validate request source headers (Host, Origin, Referer)
-pub async fn validate_request_source(
-    config: axum::Extension<RequestSourceConfig>,
+/// Middleware to validate request security headers (User-Agent and Upsclr-Request)
+pub async fn validate_request_security(
+    config: axum::Extension<SecurityConfig>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<Response, AppError> {
     let headers = request.headers();
     
-    // Validate Host header if configured
-    if let Some(ref allowed_host) = config.allowed_host {
-        if let Some(host_header) = headers.get(axum::http::header::HOST) {
-            let host_value = host_header.to_str().map_err(|_| {
-                AppError::Forbidden("Invalid Host header format".to_string())
+    // Validate User-Agent header if configured
+    if config.require_user_agent_prefix {
+        if let Some(user_agent_header) = headers.get(axum::http::header::USER_AGENT) {
+            let user_agent_value = user_agent_header.to_str().map_err(|_| {
+                AppError::Forbidden("Invalid User-Agent header format".to_string())
             })?;
-            if host_value != allowed_host {
+            if !user_agent_value.starts_with("Upsclr/") && !user_agent_value.starts_with("Upsclr-") {
                 return Err(AppError::Forbidden(format!(
-                    "Invalid Host header: expected '{}', got '{}'",
-                    allowed_host, host_value
+                    "Invalid User-Agent header: expected to start with 'Upsclr/' or 'Upsclr-', got '{}'",
+                    user_agent_value
                 )));
             }
         } else {
-            return Err(AppError::Forbidden("Missing required Host header".to_string()));
+            return Err(AppError::Forbidden("Missing required User-Agent header".to_string()));
         }
     }
     
-    // Validate Origin header if configured
-    if let Some(ref allowed_origin) = config.allowed_origin {
-        if let Some(origin_header) = headers.get(axum::http::header::ORIGIN) {
-            let origin_value = origin_header.to_str().map_err(|_| {
-                AppError::Forbidden("Invalid Origin header format".to_string())
+    // Validate Upsclr-Request header if configured
+    if config.require_upsclr_request_header {
+        if let Some(upsclr_request_header) = headers.get("Upsclr-Request") {
+            let upsclr_request_value = upsclr_request_header.to_str().map_err(|_| {
+                AppError::Forbidden("Invalid Upsclr-Request header format".to_string())
             })?;
-            if origin_value != allowed_origin {
-                return Err(AppError::Forbidden(format!(
-                    "Invalid Origin header: expected '{}', got '{}'",
-                    allowed_origin, origin_value
-                )));
+            if upsclr_request_value.is_empty() {
+                return Err(AppError::Forbidden("Upsclr-Request header must not be empty".to_string()));
             }
         } else {
-            return Err(AppError::Forbidden("Missing required Origin header".to_string()));
-        }
-    }
-    
-    // Validate Referer header if configured
-    if let Some(ref allowed_referer) = config.allowed_referer {
-        if let Some(referer_header) = headers.get(axum::http::header::REFERER) {
-            let referer_value = referer_header.to_str().map_err(|_| {
-                AppError::Forbidden("Invalid Referer header format".to_string())
-            })?;
-            if referer_value != allowed_referer {
-                return Err(AppError::Forbidden(format!(
-                    "Invalid Referer header: expected '{}', got '{}'",
-                    allowed_referer, referer_value
-                )));
-            }
-        } else {
-            return Err(AppError::Forbidden("Missing required Referer header".to_string()));
+            return Err(AppError::Forbidden("Missing required Upsclr-Request header".to_string()));
         }
     }
     
@@ -1007,20 +986,19 @@ mod tests {
     }
 
     // Helper function to create a service with validation middleware
-    fn create_test_service_with_validation(config: RequestSourceConfig) -> impl tower::Service<Request<Body>, Response = Response<Body>, Error = std::convert::Infallible> + Clone {
+    fn create_test_service_with_validation(config: SecurityConfig) -> impl tower::Service<Request<Body>, Response = Response<Body>, Error = std::convert::Infallible> + Clone {
         ServiceBuilder::new()
             .layer(Extension(config))
-            .layer(middleware::from_fn(validate_request_source))
+            .layer(middleware::from_fn(validate_request_security))
             .service_fn(test_service)
     }
 
     #[tokio::test]
     async fn test_no_validation_configured() {
         // When no validation is configured, all requests should pass
-        let config = RequestSourceConfig {
-            allowed_host: None,
-            allowed_origin: None,
-            allowed_referer: None,
+        let config = SecurityConfig {
+            require_user_agent_prefix: false,
+            require_upsclr_request_header: false,
         };
 
         let service = create_test_service_with_validation(config);
@@ -1030,16 +1008,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_host_validation_success() {
-        let config = RequestSourceConfig {
-            allowed_host: Some("localhost:6795".to_string()),
-            allowed_origin: None,
-            allowed_referer: None,
+    async fn test_user_agent_validation_success_upsclr_slash() {
+        let config = SecurityConfig {
+            require_user_agent_prefix: true,
+            require_upsclr_request_header: false,
         };
 
         let service = create_test_service_with_validation(config);
         let request = create_test_request(vec![
-            (axum::http::header::HOST, HeaderValue::from_static("localhost:6795"))
+            (axum::http::header::USER_AGENT, HeaderValue::from_static("Upsclr/1.0"))
         ]);
         
         let response = service.oneshot(request).await.unwrap();
@@ -1047,16 +1024,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_host_validation_failure() {
-        let config = RequestSourceConfig {
-            allowed_host: Some("localhost:6795".to_string()),
-            allowed_origin: None,
-            allowed_referer: None,
+    async fn test_user_agent_validation_success_upsclr_dash() {
+        let config = SecurityConfig {
+            require_user_agent_prefix: true,
+            require_upsclr_request_header: false,
         };
 
         let service = create_test_service_with_validation(config);
         let request = create_test_request(vec![
-            (axum::http::header::HOST, HeaderValue::from_static("evil.com"))
+            (axum::http::header::USER_AGENT, HeaderValue::from_static("Upsclr-client/2.1"))
+        ]);
+        
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_user_agent_validation_failure() {
+        let config = SecurityConfig {
+            require_user_agent_prefix: true,
+            require_upsclr_request_header: false,
+        };
+
+        let service = create_test_service_with_validation(config);
+        let request = create_test_request(vec![
+            (axum::http::header::USER_AGENT, HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"))
         ]);
         
         let response = service.oneshot(request).await.unwrap();
@@ -1065,17 +1057,16 @@ mod tests {
         // Check the response body contains the error message
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
-        assert!(body_str.contains("Invalid Host header"));
-        assert!(body_str.contains("localhost:6795"));
-        assert!(body_str.contains("evil.com"));
+        assert!(body_str.contains("Invalid User-Agent header"));
+        assert!(body_str.contains("expected to start with 'Upsclr/' or 'Upsclr-'"));
+        assert!(body_str.contains("Mozilla/5.0"));
     }
 
     #[tokio::test]
-    async fn test_host_validation_missing_header() {
-        let config = RequestSourceConfig {
-            allowed_host: Some("localhost:6795".to_string()),
-            allowed_origin: None,
-            allowed_referer: None,
+    async fn test_user_agent_validation_missing_header() {
+        let config = SecurityConfig {
+            require_user_agent_prefix: true,
+            require_upsclr_request_header: false,
         };
 
         let service = create_test_service_with_validation(config);
@@ -1085,20 +1076,19 @@ mod tests {
         
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
-        assert!(body_str.contains("Missing required Host header"));
+        assert!(body_str.contains("Missing required User-Agent header"));
     }
 
     #[tokio::test]
-    async fn test_origin_validation_success() {
-        let config = RequestSourceConfig {
-            allowed_host: None,
-            allowed_origin: Some("https://myapp.com".to_string()),
-            allowed_referer: None,
+    async fn test_upsclr_request_validation_success() {
+        let config = SecurityConfig {
+            require_user_agent_prefix: false,
+            require_upsclr_request_header: true,
         };
 
         let service = create_test_service_with_validation(config);
         let request = create_test_request(vec![
-            (axum::http::header::ORIGIN, HeaderValue::from_static("https://myapp.com"))
+            (HeaderName::from_static("upsclr-request"), HeaderValue::from_static("true"))
         ]);
         
         let response = service.oneshot(request).await.unwrap();
@@ -1106,16 +1096,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_origin_validation_failure() {
-        let config = RequestSourceConfig {
-            allowed_host: None,
-            allowed_origin: Some("https://myapp.com".to_string()),
-            allowed_referer: None,
+    async fn test_upsclr_request_validation_failure_empty() {
+        let config = SecurityConfig {
+            require_user_agent_prefix: false,
+            require_upsclr_request_header: true,
         };
 
         let service = create_test_service_with_validation(config);
         let request = create_test_request(vec![
-            (axum::http::header::ORIGIN, HeaderValue::from_static("https://evil.com"))
+            (HeaderName::from_static("upsclr-request"), HeaderValue::from_static(""))
         ]);
         
         let response = service.oneshot(request).await.unwrap();
@@ -1123,22 +1112,37 @@ mod tests {
         
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
-        assert!(body_str.contains("Invalid Origin header"));
-        assert!(body_str.contains("https://myapp.com"));
-        assert!(body_str.contains("https://evil.com"));
+        assert!(body_str.contains("Upsclr-Request header must not be empty"));
     }
 
     #[tokio::test]
-    async fn test_referer_validation_success() {
-        let config = RequestSourceConfig {
-            allowed_host: None,
-            allowed_origin: None,
-            allowed_referer: Some("https://myapp.com/upscaler".to_string()),
+    async fn test_upsclr_request_validation_missing_header() {
+        let config = SecurityConfig {
+            require_user_agent_prefix: false,
+            require_upsclr_request_header: true,
+        };
+
+        let service = create_test_service_with_validation(config);
+        let request = create_test_request(vec![]);
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 403);
+        
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("Missing required Upsclr-Request header"));
+    }
+
+    #[tokio::test]
+    async fn test_both_validations_success() {
+        let config = SecurityConfig {
+            require_user_agent_prefix: true,
+            require_upsclr_request_header: true,
         };
 
         let service = create_test_service_with_validation(config);
         let request = create_test_request(vec![
-            (axum::http::header::REFERER, HeaderValue::from_static("https://myapp.com/upscaler"))
+            (axum::http::header::USER_AGENT, HeaderValue::from_static("Upsclr/1.0")),
+            (HeaderName::from_static("upsclr-request"), HeaderValue::from_static("upscale")),
         ]);
         
         let response = service.oneshot(request).await.unwrap();
@@ -1146,16 +1150,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_referer_validation_failure() {
-        let config = RequestSourceConfig {
-            allowed_host: None,
-            allowed_origin: None,
-            allowed_referer: Some("https://myapp.com/upscaler".to_string()),
+    async fn test_both_validations_user_agent_fails() {
+        let config = SecurityConfig {
+            require_user_agent_prefix: true,
+            require_upsclr_request_header: true,
         };
 
         let service = create_test_service_with_validation(config);
         let request = create_test_request(vec![
-            (axum::http::header::REFERER, HeaderValue::from_static("https://evil.com/malicious"))
+            (axum::http::header::USER_AGENT, HeaderValue::from_static("BadClient/1.0")),
+            (HeaderName::from_static("upsclr-request"), HeaderValue::from_static("upscale")),
         ]);
         
         let response = service.oneshot(request).await.unwrap();
@@ -1163,45 +1167,20 @@ mod tests {
         
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
-        assert!(body_str.contains("Invalid Referer header"));
-        assert!(body_str.contains("https://myapp.com/upscaler"));
-        assert!(body_str.contains("https://evil.com/malicious"));
+        assert!(body_str.contains("Invalid User-Agent header"));
     }
 
     #[tokio::test]
-    async fn test_multiple_headers_validation_success() {
-        let config = RequestSourceConfig {
-            allowed_host: Some("localhost:6795".to_string()),
-            allowed_origin: Some("https://myapp.com".to_string()),
-            allowed_referer: Some("https://myapp.com/upscaler".to_string()),
+    async fn test_both_validations_upsclr_request_fails() {
+        let config = SecurityConfig {
+            require_user_agent_prefix: true,
+            require_upsclr_request_header: true,
         };
 
         let service = create_test_service_with_validation(config);
         let request = create_test_request(vec![
-            (axum::http::header::HOST, HeaderValue::from_static("localhost:6795")),
-            (axum::http::header::ORIGIN, HeaderValue::from_static("https://myapp.com")),
-            (axum::http::header::REFERER, HeaderValue::from_static("https://myapp.com/upscaler")),
-        ]);
-        
-        let response = service.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), 200);
-    }
-
-    #[tokio::test]
-    async fn test_multiple_headers_validation_partial_failure() {
-        // Test that if one header fails validation, the entire request is rejected
-        let config = RequestSourceConfig {
-            allowed_host: Some("localhost:6795".to_string()),
-            allowed_origin: Some("https://myapp.com".to_string()),
-            allowed_referer: Some("https://myapp.com/upscaler".to_string()),
-        };
-
-        let service = create_test_service_with_validation(config);
-        // Valid host and origin, but invalid referer
-        let request = create_test_request(vec![
-            (axum::http::header::HOST, HeaderValue::from_static("localhost:6795")),
-            (axum::http::header::ORIGIN, HeaderValue::from_static("https://myapp.com")),
-            (axum::http::header::REFERER, HeaderValue::from_static("https://evil.com/malicious")),
+            (axum::http::header::USER_AGENT, HeaderValue::from_static("Upsclr/1.0")),
+            (HeaderName::from_static("upsclr-request"), HeaderValue::from_static("")),
         ]);
         
         let response = service.oneshot(request).await.unwrap();
@@ -1209,28 +1188,48 @@ mod tests {
         
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
-        assert!(body_str.contains("Invalid Referer header"));
+        assert!(body_str.contains("Upsclr-Request header must not be empty"));
     }
 
     #[tokio::test]
-    async fn test_invalid_header_format() {
-        let config = RequestSourceConfig {
-            allowed_host: Some("localhost:6795".to_string()),
-            allowed_origin: None,
-            allowed_referer: None,
+    async fn test_user_agent_validation_case_sensitive() {
+        // Test that validation is case-sensitive - "upsclr" should fail
+        let config = SecurityConfig {
+            require_user_agent_prefix: true,
+            require_upsclr_request_header: false,
         };
 
         let service = create_test_service_with_validation(config);
-        // Create a request with invalid UTF-8 in the Host header
+        let request = create_test_request(vec![
+            (axum::http::header::USER_AGENT, HeaderValue::from_static("upsclr/1.0"))
+        ]);
+        
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 403);
+        
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("Invalid User-Agent header"));
+    }
+
+    #[tokio::test]
+    async fn test_invalid_user_agent_header_format() {
+        let config = SecurityConfig {
+            require_user_agent_prefix: true,
+            require_upsclr_request_header: false,
+        };
+
+        let service = create_test_service_with_validation(config);
+        // Create a request with invalid UTF-8 in the User-Agent header
         let mut request = Request::builder()
             .method(Method::GET)
             .uri("/test")
             .body(Body::empty())
             .unwrap();
         
-        // Insert invalid UTF-8 bytes into the Host header
+        // Insert invalid UTF-8 bytes into the User-Agent header
         request.headers_mut().insert(
-            axum::http::header::HOST,
+            axum::http::header::USER_AGENT,
             HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap()
         );
         
@@ -1239,37 +1238,62 @@ mod tests {
         
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
-        assert!(body_str.contains("Invalid Host header format"));
+        assert!(body_str.contains("Invalid User-Agent header format"));
     }
 
     #[tokio::test]
-    async fn test_request_source_config_clone() {
+    async fn test_invalid_upsclr_request_header_format() {
+        let config = SecurityConfig {
+            require_user_agent_prefix: false,
+            require_upsclr_request_header: true,
+        };
+
+        let service = create_test_service_with_validation(config);
+        // Create a request with invalid UTF-8 in the Upsclr-Request header
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        
+        // Insert invalid UTF-8 bytes into the Upsclr-Request header
+        request.headers_mut().insert(
+            HeaderName::from_static("upsclr-request"),
+            HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap()
+        );
+        
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 403);
+        
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("Invalid Upsclr-Request header format"));
+    }
+
+    #[tokio::test]
+    async fn test_security_config_clone() {
         // Test that the config can be cloned correctly
-        let config = RequestSourceConfig {
-            allowed_host: Some("localhost:6795".to_string()),
-            allowed_origin: Some("https://myapp.com".to_string()),
-            allowed_referer: Some("https://myapp.com/upscaler".to_string()),
+        let config = SecurityConfig {
+            require_user_agent_prefix: true,
+            require_upsclr_request_header: false,
         };
         
         let config_clone = config.clone();
         
-        assert_eq!(config.allowed_host, config_clone.allowed_host);
-        assert_eq!(config.allowed_origin, config_clone.allowed_origin);
-        assert_eq!(config.allowed_referer, config_clone.allowed_referer);
+        assert_eq!(config.require_user_agent_prefix, config_clone.require_user_agent_prefix);
+        assert_eq!(config.require_upsclr_request_header, config_clone.require_upsclr_request_header);
     }
 
     #[tokio::test]
     async fn test_config_debug_format() {
         // Test that the config can be debug formatted (for logging)
-        let config = RequestSourceConfig {
-            allowed_host: Some("localhost:6795".to_string()),
-            allowed_origin: Some("https://myapp.com".to_string()),
-            allowed_referer: Some("https://myapp.com/upscaler".to_string()),
+        let config = SecurityConfig {
+            require_user_agent_prefix: true,
+            require_upsclr_request_header: true,
         };
         
         let debug_str = format!("{:?}", config);
-        assert!(debug_str.contains("localhost:6795"));
-        assert!(debug_str.contains("https://myapp.com"));
-        assert!(debug_str.contains("https://myapp.com/upscaler"));
+        assert!(debug_str.contains("require_user_agent_prefix: true"));
+        assert!(debug_str.contains("require_upsclr_request_header: true"));
     }
 }

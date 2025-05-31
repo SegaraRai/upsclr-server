@@ -27,7 +27,6 @@ use std::{
 };
 use tokio::signal;
 use tower_http::{
-    cors::CorsLayer,                      // For Cross-Origin Resource Sharing
     trace::{DefaultMakeSpan, TraceLayer}, // For detailed request logging
 };
 use tracing::Level;
@@ -49,20 +48,15 @@ struct AppConfig {
     #[arg(long, env = "UPSCLR_SERVER_PLUGINS_DIR", default_value = "plugins")]
     plugins_dir: String,
 
-    /// Allowed Host header value for request validation (optional security feature).
-    /// If not specified, Host header validation is disabled.
-    #[arg(long, env = "UPSCLR_SERVER_ALLOWED_HOST")]
-    allowed_host: Option<String>,
+    /// Disable User-Agent validation that requires User-Agent to start with 'Upsclr/' or 'Upsclr-'.
+    /// By default, User-Agent validation is enabled for security.
+    #[arg(long, env = "UPSCLR_SERVER_ALLOW_ANY_USER_AGENT", action = clap::ArgAction::SetTrue)]
+    allow_any_user_agent: bool,
 
-    /// Allowed Origin header value for request validation (optional security feature).
-    /// If not specified, Origin header validation is disabled.
-    #[arg(long, env = "UPSCLR_SERVER_ALLOWED_ORIGIN")]
-    allowed_origin: Option<String>,
-
-    /// Allowed Referer header value for request validation (optional security feature).
-    /// If not specified, Referer header validation is disabled.
-    #[arg(long, env = "UPSCLR_SERVER_ALLOWED_REFERER")]
-    allowed_referer: Option<String>,
+    /// Disable Upsclr-Request header validation that requires the header to be non-empty.
+    /// By default, Upsclr-Request header validation is enabled for security.
+    #[arg(long, env = "UPSCLR_SERVER_ALLOW_MISSING_UPSCLR_REQUEST", action = clap::ArgAction::SetTrue)]
+    allow_missing_upsclr_request: bool,
 }
 
 #[tokio::main]
@@ -116,29 +110,23 @@ async fn main() {
     let instance_manager_arc = Arc::new(RwLock::new(InstanceManager::default()));
     tracing::info!("InstanceManager initialized.");
 
-    // --- Configure Request Source Validation ---
-    let request_source_config = handlers::RequestSourceConfig {
-        allowed_host: config.allowed_host.clone(),
-        allowed_origin: config.allowed_origin.clone(),
-        allowed_referer: config.allowed_referer.clone(),
+    // --- Configure Security Validation ---
+    let security_config = handlers::SecurityConfig {
+        require_user_agent_prefix: !config.allow_any_user_agent,
+        require_upsclr_request_header: !config.allow_missing_upsclr_request,
     };
     
     // Log the security configuration
-    if request_source_config.allowed_host.is_some() 
-        || request_source_config.allowed_origin.is_some() 
-        || request_source_config.allowed_referer.is_some() {
-        tracing::info!("Request source validation enabled with restrictions:");
-        if let Some(ref host) = request_source_config.allowed_host {
-            tracing::info!("  - Allowed Host: {}", host);
+    if security_config.require_user_agent_prefix || security_config.require_upsclr_request_header {
+        tracing::info!("Request security validation enabled:");
+        if security_config.require_user_agent_prefix {
+            tracing::info!("  - User-Agent must start with 'Upsclr/' or 'Upsclr-'");
         }
-        if let Some(ref origin) = request_source_config.allowed_origin {
-            tracing::info!("  - Allowed Origin: {}", origin);
-        }
-        if let Some(ref referer) = request_source_config.allowed_referer {
-            tracing::info!("  - Allowed Referer: {}", referer);
+        if security_config.require_upsclr_request_header {
+            tracing::info!("  - Upsclr-Request header must be non-empty");
         }
     } else {
-        tracing::warn!("Request source validation is disabled - all requests will be allowed");
+        tracing::warn!("Request security validation is disabled - all requests will be allowed");
     }
 
     // --- Build Axum Application Router ---
@@ -169,33 +157,13 @@ async fn main() {
         // Apply a layer to limit the maximum size of request bodies (e.g., for image uploads).
         .layer(DefaultBodyLimit::max(handlers::MAX_IMAGE_SIZE_BYTES));
 
-    // Apply request source validation middleware if any restrictions are configured
-    if request_source_config.allowed_host.is_some() 
-        || request_source_config.allowed_origin.is_some() 
-        || request_source_config.allowed_referer.is_some() {
-        app = app.layer(middleware::from_fn(handlers::validate_request_source))
-               .layer(Extension(request_source_config.clone()));
+    // Apply security validation middleware if any restrictions are configured
+    if security_config.require_user_agent_prefix || security_config.require_upsclr_request_header {
+        app = app.layer(middleware::from_fn(handlers::validate_request_security))
+               .layer(Extension(security_config));
     }
     
-    // Configure CORS based on whether source validation is enabled
-    let cors_layer = if let Some(ref allowed_origin) = request_source_config.allowed_origin {
-        // If origin validation is enabled, use more restrictive CORS
-        if let Ok(origin_header) = allowed_origin.parse::<axum::http::HeaderValue>() {
-            CorsLayer::new()
-                .allow_origin(origin_header)
-                .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::DELETE])
-                .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::ACCEPT])
-        } else {
-            tracing::warn!("Invalid origin format '{}', falling back to permissive CORS", allowed_origin);
-            CorsLayer::permissive()
-        }
-    } else {
-        // Use permissive CORS if no origin validation
-        CorsLayer::permissive()
-    };
-    
     let app = app
-        .layer(cors_layer)
         // Add a TraceLayer for logging HTTP request and response details.
         .layer(
             TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::new().level(Level::INFO)), // Log at INFO level
